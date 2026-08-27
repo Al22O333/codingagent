@@ -5,7 +5,7 @@ from typing import cast
 import pytest
 from pydantic import ValidationError
 
-from coding_agent.protocol import ToolCapability, ToolKind
+from coding_agent.protocol import ToolCall, ToolCapability, ToolKind
 from coding_agent.tooling import (
     DuplicateToolNameError,
     InvalidToolSpecError,
@@ -62,6 +62,20 @@ def test_tool_argument_validation_is_strict_and_forbids_extra_fields() -> None:
         tool.validate({"path": "main.py", "count": "2"})
     with pytest.raises(ValidationError):
         tool.validate({"path": "main.py", "unknown": True})
+
+
+def test_tool_validates_immutable_protocol_arguments() -> None:
+    tool = DummyTool()
+    call = ToolCall(
+        call_id="call-1",
+        name="dummy",
+        raw_arguments={"path": "main.py", "count": 2},
+    )
+
+    assert tool.validate(call.raw_arguments) == DummyArguments(
+        path="main.py",
+        count=2,
+    )
 
 
 def test_registry_registers_and_returns_tool_and_specs() -> None:

@@ -1,4 +1,4 @@
-"""Minimal AgentRuntime for a user-to-model-to-final run."""
+"""AgentRuntime with a minimal single-ToolCall local dispatch loop."""
 
 from __future__ import annotations
 
@@ -6,9 +6,29 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from uuid import uuid4
 
+from pydantic import ValidationError
+
 from .context import ContextManager
 from .model_client import ModelClient
-from .protocol import AssistantMessage, ModelRequest, ModelResponse, UserMessage
+from .protocol import (
+    AssistantMessage,
+    ModelRequest,
+    ModelResponse,
+    ToolCall,
+    ToolError,
+    ToolKind,
+    ToolOutcome,
+    ToolResult,
+    ToolResultMessage,
+    UserMessage,
+)
+from .tooling import (
+    LocalTool,
+    ToolExecutionResult,
+    ToolRegistry,
+    UnknownToolError,
+)
+from .workspace import ResolvedPath
 
 
 class RunState(StrEnum):
@@ -39,6 +59,7 @@ class AgentRun:
     current_task: str
     state: RunState = RunState.RUNNING
     model_turns: int = 0
+    tool_call_attempts: int = 0
     consecutive_protocol_errors: int = 0
     final_response: str | None = None
     termination_reason: TerminationReason | None = None
@@ -68,9 +89,11 @@ class AgentRuntime:
         self,
         model_client: ModelClient,
         context_manager: ContextManager,
+        tool_registry: ToolRegistry,
     ) -> None:
         self._model_client = model_client
         self._context_manager = context_manager
+        self._tool_registry = tool_registry
         self.session = Session()
 
     def run(self, task: str) -> AgentRun:
@@ -79,36 +102,200 @@ class AgentRuntime:
         self.session._add_run(agent_run)
         self._context_manager.record_user_message(UserMessage(text=task))
 
-        request = ModelRequest(messages=self._context_manager.build_messages())
+        while agent_run.state is RunState.RUNNING:
+            request = ModelRequest(
+                messages=self._context_manager.build_messages(),
+                tools=self._tool_registry.specs(),
+            )
+
+            try:
+                response = self._model_client.complete(request)
+            except KeyboardInterrupt:
+                agent_run.state = RunState.CANCELLED
+                agent_run.termination_reason = TerminationReason.USER_CANCELLATION
+                return agent_run
+
+            agent_run.model_turns += 1
+
+            if response.tool_calls:
+                if len(response.tool_calls) != 1:
+                    raise NotImplementedError(
+                        "multi-tool responses are outside Step 8 scope"
+                    )
+                assistant_message = AssistantMessage(
+                    text=response.text,
+                    tool_calls=response.tool_calls,
+                )
+                self._context_manager.record_assistant_message(assistant_message)
+                tool_result = self._dispatch_local_tool_call(
+                    response.tool_calls[0],
+                    agent_run,
+                )
+                self._context_manager.record_tool_result_message(
+                    ToolResultMessage(results=(tool_result,))
+                )
+                continue
+
+            if not self._is_final_response(response):
+                error = ModelProtocolError(
+                    "model returned no tool calls and no non-blank final text"
+                )
+                agent_run.consecutive_protocol_errors += 1
+                agent_run.last_error = error
+                agent_run.state = RunState.FAILED
+                agent_run.termination_reason = TerminationReason.PROTOCOL_FAILURE
+                return agent_run
+
+            assistant_message = AssistantMessage(text=response.text)
+            self._context_manager.record_assistant_message(assistant_message)
+            agent_run.final_response = response.text
+            agent_run.consecutive_protocol_errors = 0
+            agent_run.state = RunState.COMPLETED
+            return agent_run
+
+        return agent_run
+
+    def _dispatch_local_tool_call(
+        self,
+        tool_call: ToolCall,
+        agent_run: AgentRun,
+    ) -> ToolResult:
+        agent_run.tool_call_attempts += 1
 
         try:
-            response = self._model_client.complete(request)
-        except KeyboardInterrupt:
-            agent_run.state = RunState.CANCELLED
-            agent_run.termination_reason = TerminationReason.USER_CANCELLATION
-            return agent_run
-
-        agent_run.model_turns += 1
-
-        if response.tool_calls:
-            raise NotImplementedError("tool turns are outside Step 5 scope")
-
-        if not self._is_final_response(response):
-            error = ModelProtocolError(
-                "model returned no tool calls and no non-blank final text"
+            tool = self._tool_registry.get(tool_call.name)
+        except UnknownToolError:
+            return ToolResult(
+                call_id=tool_call.call_id,
+                tool_name=tool_call.name,
+                outcome=ToolOutcome.VALIDATION_ERROR,
+                error=ToolError(
+                    code="UNKNOWN_TOOL",
+                    message=f"unknown tool: {tool_call.name}",
+                ),
             )
-            agent_run.consecutive_protocol_errors += 1
-            agent_run.last_error = error
-            agent_run.state = RunState.FAILED
-            agent_run.termination_reason = TerminationReason.PROTOCOL_FAILURE
-            return agent_run
 
-        assistant_message = AssistantMessage(text=response.text)
-        self._context_manager.record_assistant_message(assistant_message)
-        agent_run.final_response = response.text
-        agent_run.consecutive_protocol_errors = 0
-        agent_run.state = RunState.COMPLETED
-        return agent_run
+        try:
+            arguments = tool.validate(tool_call.raw_arguments)
+        except ValidationError as error:
+            return ToolResult(
+                call_id=tool_call.call_id,
+                tool_name=tool_call.name,
+                outcome=ToolOutcome.VALIDATION_ERROR,
+                error=ToolError(
+                    code="INVALID_ARGUMENTS",
+                    message="tool arguments failed validation",
+                    details={
+                        "issues": error.errors(
+                            include_context=False,
+                            include_input=False,
+                            include_url=False,
+                        )
+                    },
+                ),
+            )
+
+        if tool.spec.kind is not ToolKind.LOCAL or not isinstance(tool, LocalTool):
+            return ToolResult(
+                call_id=tool_call.call_id,
+                tool_name=tool_call.name,
+                outcome=ToolOutcome.VALIDATION_ERROR,
+                error=ToolError(
+                    code="UNSUPPORTED_TOOL_KIND",
+                    message="Step 8 runtime only dispatches executable LOCAL tools",
+                ),
+            )
+
+        try:
+            prepared = tool.prepare(arguments)
+        except Exception:
+            return self._operation_failure(
+                tool_call.call_id,
+                tool_call.name,
+                ToolError(
+                    code="INTERNAL_TOOL_ERROR",
+                    message="local tool preparation failed unexpectedly",
+                ),
+            )
+
+        if isinstance(prepared, ToolError):
+            return self._operation_failure(
+                tool_call.call_id,
+                tool_call.name,
+                prepared,
+            )
+
+        policy_rejection = self._minimal_file_policy(tool_call, prepared)
+        if policy_rejection is not None:
+            return policy_rejection
+
+        try:
+            execution = tool.execute(arguments, prepared)
+        except Exception:
+            return self._operation_failure(
+                tool_call.call_id,
+                tool_call.name,
+                ToolError(
+                    code="INTERNAL_TOOL_ERROR",
+                    message="local tool execution failed unexpectedly",
+                ),
+            )
+
+        if not isinstance(execution, ToolExecutionResult):
+            return self._operation_failure(
+                tool_call.call_id,
+                tool_call.name,
+                ToolError(
+                    code="INTERNAL_TOOL_ERROR",
+                    message="local tool returned an invalid execution result",
+                ),
+            )
+
+        return ToolResult(
+            call_id=tool_call.call_id,
+            tool_name=tool_call.name,
+            outcome=execution.outcome,
+            content=execution.content,
+            error=execution.error,
+        )
+
+    @staticmethod
+    def _minimal_file_policy(
+        tool_call: ToolCall,
+        prepared: object,
+    ) -> ToolResult | None:
+        if not isinstance(prepared, ResolvedPath):
+            return None
+        if not prepared.is_within_workspace:
+            code = "WORKSPACE_BOUNDARY"
+            message = "File Tool access outside the workspace is prohibited"
+        elif prepared.is_sensitive:
+            code = "SENSITIVE_PATH_CONFIRMATION_REQUIRED"
+            message = "Sensitive Path access requires explicit user confirmation"
+        elif prepared.is_protected:
+            code = "PROTECTED_PATH_CONFIRMATION_REQUIRED"
+            message = "Protected Path access requires explicit user confirmation"
+        else:
+            return None
+        return ToolResult(
+            call_id=tool_call.call_id,
+            tool_name=tool_call.name,
+            outcome=ToolOutcome.POLICY_REJECTED,
+            error=ToolError(code=code, message=message),
+        )
+
+    @staticmethod
+    def _operation_failure(
+        call_id: str,
+        tool_name: str,
+        error: ToolError,
+    ) -> ToolResult:
+        return ToolResult(
+            call_id=call_id,
+            tool_name=tool_name,
+            outcome=ToolOutcome.OPERATION_FAILURE,
+            error=error,
+        )
 
     @staticmethod
     def _is_final_response(response: ModelResponse) -> bool:

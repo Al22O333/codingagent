@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict
 
@@ -56,7 +56,18 @@ class Tool(Generic[ArgumentsT]):
 
     def validate(self, raw_arguments: object) -> ArgumentsT:
         """Validate untrusted model arguments into a typed immutable value."""
-        return self.argument_model.model_validate(raw_arguments)
+        return self.argument_model.model_validate(_validation_input(raw_arguments))
+
+
+def _validation_input(value: object) -> object:
+    """Copy immutable protocol containers into ordinary JSON-like containers."""
+    if isinstance(value, Mapping):
+        return {key: _validation_input(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_validation_input(item) for item in value]
+    if isinstance(value, frozenset):
+        return [_validation_input(item) for item in value]
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +90,32 @@ class ToolExecutionResult:
             raise ValueError("successful execution must not contain ToolError")
         if self.outcome is ToolOutcome.OPERATION_FAILURE and self.error is None:
             raise ValueError("operation failure must contain ToolError")
+
+
+@runtime_checkable
+class LocalTool(Protocol):
+    """Minimal executable LOCAL Tool seam used by AgentRuntime."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        """Return provider-neutral metadata."""
+        ...
+
+    def validate(self, raw_arguments: object) -> Any:
+        """Validate untrusted arguments."""
+        ...
+
+    def prepare(self, arguments: Any) -> object | ToolError:
+        """Return dynamic operation facts or an expected preparation error."""
+        ...
+
+    def execute(
+        self,
+        arguments: Any,
+        prepared: object,
+    ) -> ToolExecutionResult:
+        """Execute an already prepared and permitted local action."""
+        ...
 
 
 class ToolRegistryError(ValueError):
@@ -155,6 +192,7 @@ class ToolRegistry:
 __all__ = [
     "DuplicateToolNameError",
     "InvalidToolSpecError",
+    "LocalTool",
     "Tool",
     "ToolArguments",
     "ToolExecutionResult",

@@ -19,13 +19,14 @@ from coding_agent.runtime import (
     RunState,
     TerminationReason,
 )
+from coding_agent.tooling import ToolRegistry
 
 
 def test_valid_final_response_completes_run() -> None:
     response = ModelResponse(text="Task completed.")
     client = FakeModelClient([response])
     context = ContextManager()
-    runtime = AgentRuntime(client, context)
+    runtime = AgentRuntime(client, context, ToolRegistry())
 
     run = runtime.run("Complete the task")
 
@@ -48,7 +49,7 @@ def test_empty_no_tool_response_follows_protocol_error_path(
 ) -> None:
     client = FakeModelClient([ModelResponse(text=text)])
     context = ContextManager()
-    runtime = AgentRuntime(client, context)
+    runtime = AgentRuntime(client, context, ToolRegistry())
 
     run = runtime.run("Complete the task")
 
@@ -67,7 +68,7 @@ def test_session_keeps_sequential_runs_and_conversation_continuity() -> None:
         [ModelResponse(text="First final."), ModelResponse(text="Second final.")]
     )
     context = ContextManager()
-    runtime = AgentRuntime(client, context)
+    runtime = AgentRuntime(client, context, ToolRegistry())
 
     first = runtime.run("First task")
     second = runtime.run("Second task")
@@ -89,7 +90,7 @@ def test_keyboard_interrupt_cancels_run_without_consuming_model_turn() -> None:
 
     client = InterruptingModelClient()
     context = ContextManager()
-    runtime = AgentRuntime(client, context)
+    runtime = AgentRuntime(client, context, ToolRegistry())
 
     run = runtime.run("Complete the task")
 
@@ -100,19 +101,25 @@ def test_keyboard_interrupt_cancels_run_without_consuming_model_turn() -> None:
     assert context.build_messages() == (UserMessage("Complete the task"),)
 
 
-def test_tool_turn_is_not_executed_by_step_5_runtime() -> None:
-    tool_call = ToolCall(
-        call_id="call-1",
-        name="read_file",
-        raw_arguments={"path": "main.py"},
+def test_multi_tool_turn_is_not_implemented_before_step_9() -> None:
+    first_call = ToolCall(
+        call_id="call-1", name="read_file", raw_arguments={"path": "main.py"}
+    )
+    second_call = ToolCall(
+        call_id="call-2", name="read_file", raw_arguments={"path": "other.py"}
     )
     client = FakeModelClient(
-        [ModelResponse(text="I will inspect it.", tool_calls=(tool_call,))]
+        [
+            ModelResponse(
+                text="I will inspect them.",
+                tool_calls=(first_call, second_call),
+            )
+        ]
     )
     context = ContextManager()
-    runtime = AgentRuntime(client, context)
+    runtime = AgentRuntime(client, context, ToolRegistry())
 
-    with pytest.raises(NotImplementedError, match="outside Step 5 scope"):
-        runtime.run("Inspect main.py")
+    with pytest.raises(NotImplementedError, match="outside Step 8 scope"):
+        runtime.run("Inspect both files")
 
-    assert context.build_messages() == (UserMessage("Inspect main.py"),)
+    assert context.build_messages() == (UserMessage("Inspect both files"),)
