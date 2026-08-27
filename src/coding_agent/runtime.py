@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
+from .ask_user import AskUserArguments
 from .constraints import (
     ConstraintDecision,
     ExplicitConstraintSnapshot,
@@ -20,6 +21,8 @@ from .context import ContextManager
 from .interaction import (
     ConfirmationDecision,
     ConfirmationRequest,
+    ClarificationRequest,
+    ClarificationStatus,
     UserInteraction,
     UserInteractionError,
 )
@@ -77,6 +80,7 @@ class WaitReason(StrEnum):
     """Reasons represented beneath the single WAITING_FOR_USER state."""
 
     PERMISSION_CONFIRMATION = "PERMISSION_CONFIRMATION"
+    CLARIFICATION = "CLARIFICATION"
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,7 +141,7 @@ class AgentRun:
         default_factory=ExplicitConstraintSnapshot
     )
     wait_reason: WaitReason | None = None
-    pending_user_request: ConfirmationRequest | None = None
+    pending_user_request: ConfirmationRequest | ClarificationRequest | None = None
     pending_action: PendingAction | None = None
     paused_duration_seconds: float = 0.0
 
@@ -289,7 +293,7 @@ class AgentRuntime:
                 batch_stopped = True
                 continue
 
-            dispatch = self._dispatch_local_tool_call(tool_call, agent_run)
+            dispatch = self._dispatch_tool_call(tool_call, agent_run)
             results.append(dispatch.result)
             if dispatch.ends_batch:
                 batch_stopped = True
@@ -446,7 +450,7 @@ class AgentRuntime:
             ),
         )
 
-    def _dispatch_local_tool_call(
+    def _dispatch_tool_call(
         self,
         tool_call: ToolCall,
         agent_run: AgentRun,
@@ -485,6 +489,21 @@ class AgentRuntime:
                     },
                 ),
             ))
+
+        if tool.spec.kind is ToolKind.INTERACTION:
+            if tool.spec.name != "ask_user" or not isinstance(
+                arguments, AskUserArguments
+            ):
+                return self._dispatch_result(ToolResult(
+                    call_id=tool_call.call_id,
+                    tool_name=tool_call.name,
+                    outcome=ToolOutcome.VALIDATION_ERROR,
+                    error=ToolError(
+                        code="UNSUPPORTED_INTERACTION_TOOL",
+                        message="v1 supports only the ask_user Interaction Tool",
+                    ),
+                ))
+            return self._ask_user(tool_call, arguments, agent_run)
 
         if tool.spec.kind is not ToolKind.LOCAL or not isinstance(tool, LocalTool):
             return self._dispatch_result(ToolResult(
@@ -574,6 +593,76 @@ class AgentRuntime:
             )
 
         return self._execute_prepared(tool, prepared)
+
+    def _ask_user(
+        self,
+        tool_call: ToolCall,
+        arguments: AskUserArguments,
+        agent_run: AgentRun,
+    ) -> _ToolDispatchResult:
+        request = ClarificationRequest(
+            call_id=tool_call.call_id,
+            question=arguments.question,
+        )
+        agent_run.pending_user_request = request
+        agent_run.wait_reason = WaitReason.CLARIFICATION
+        agent_run.state = RunState.WAITING_FOR_USER
+        wait_started_at = self._clock()
+
+        try:
+            response = self._user_interaction.ask(request)
+        except KeyboardInterrupt:
+            response = None
+        except UserInteractionError as error:
+            agent_run.last_error = error
+            agent_run.state = RunState.FAILED
+            agent_run.termination_reason = TerminationReason.USER_INTERACTION_FAILURE
+            agent_run.wait_reason = None
+            agent_run.pending_user_request = None
+            return self._dispatch_result(
+                self._operation_failure(
+                    tool_call.call_id,
+                    tool_call.name,
+                    ToolError(
+                        code="USER_INTERACTION_FAILURE",
+                        message="clarification could not be completed",
+                    ),
+                )
+            )
+        finally:
+            agent_run.paused_duration_seconds += max(
+                0.0, self._clock() - wait_started_at
+            )
+
+        try:
+            if response is not None and response.status is ClarificationStatus.ANSWERED:
+                assert response.answer is not None
+                agent_run.state = RunState.RUNNING
+                self.apply_user_clarification(agent_run, response.answer)
+                return self._dispatch_result(
+                    ToolResult(
+                        call_id=tool_call.call_id,
+                        tool_name=tool_call.name,
+                        outcome=ToolOutcome.SUCCESS,
+                        content={"answer": response.answer},
+                    ),
+                    ends_batch=True,
+                )
+            agent_run.state = RunState.CANCELLED
+            agent_run.termination_reason = TerminationReason.USER_CANCELLATION
+            return self._dispatch_result(
+                self._operation_failure(
+                    tool_call.call_id,
+                    tool_call.name,
+                    ToolError(
+                        code="USER_CANCELLED_CLARIFICATION",
+                        message="user cancelled during clarification",
+                    ),
+                )
+            )
+        finally:
+            agent_run.wait_reason = None
+            agent_run.pending_user_request = None
 
     def _confirm_and_execute(
         self,
