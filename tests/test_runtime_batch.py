@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from coding_agent.context import ContextManager
+from coding_agent.interaction import FakeUserInteraction
 from coding_agent.model_client import FakeModelClient
 from coding_agent.policy import PolicyEngine
 from coding_agent.protocol import ModelResponse, ToolCall, ToolOutcome, ToolResultMessage
@@ -75,6 +76,7 @@ def test_batch_fail_stop_preserves_correspondence_and_attempt_count(
         registry,
         TEST_LIMITS,
         policy_engine=PolicyEngine(),
+        user_interaction=FakeUserInteraction(),
     )
 
     run = runtime.run("Inspect three files")
@@ -137,6 +139,7 @@ def test_validation_failure_stops_before_later_call_validation(
         registry,
         TEST_LIMITS,
         policy_engine=PolicyEngine(),
+        user_interaction=FakeUserInteraction(),
     )
 
     run = runtime.run("Read later.py")

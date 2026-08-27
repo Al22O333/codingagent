@@ -17,13 +17,19 @@ from .constraints import (
     normalize_explicit_constraint_update,
 )
 from .context import ContextManager
+from .interaction import (
+    ConfirmationDecision,
+    ConfirmationRequest,
+    UserInteraction,
+    UserInteractionError,
+)
 from .model_client import (
     FatalProviderError,
     ModelClient,
     ModelProtocolError,
     TransientProviderError,
 )
-from .policy import PermissionDecision, PolicyEngine
+from .policy import PermissionCheckResult, PermissionDecision, PolicyEngine
 from .protocol import (
     AssistantMessage,
     ModelRequest,
@@ -51,6 +57,7 @@ class RunState(StrEnum):
     """Top-level lifecycle states needed by the v1 runtime."""
 
     RUNNING = "RUNNING"
+    WAITING_FOR_USER = "WAITING_FOR_USER"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
@@ -63,6 +70,27 @@ class TerminationReason(StrEnum):
     PROVIDER_FAILURE = "PROVIDER_FAILURE"
     LIMIT_REACHED = "LIMIT_REACHED"
     USER_CANCELLATION = "USER_CANCELLATION"
+    USER_INTERACTION_FAILURE = "USER_INTERACTION_FAILURE"
+
+
+class WaitReason(StrEnum):
+    """Reasons represented beneath the single WAITING_FOR_USER state."""
+
+    PERMISSION_CONFIRMATION = "PERMISSION_CONFIRMATION"
+
+
+@dataclass(frozen=True, slots=True)
+class PendingAction:
+    """One immutable exact action awaiting one-time user authorization."""
+
+    prepared_call: PreparedToolCall
+    permission_reason: PermissionCheckResult
+
+
+@dataclass(frozen=True, slots=True)
+class _ToolDispatchResult:
+    result: ToolResult
+    ends_batch: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +136,10 @@ class AgentRun:
     explicit_task_constraints: ExplicitConstraintSnapshot = field(
         default_factory=ExplicitConstraintSnapshot
     )
+    wait_reason: WaitReason | None = None
+    pending_user_request: ConfirmationRequest | None = None
+    pending_action: PendingAction | None = None
+    paused_duration_seconds: float = 0.0
 
 
 @dataclass(slots=True)
@@ -138,6 +170,7 @@ class AgentRuntime:
         workspace_resolver: WorkspacePathResolver | None = None,
         *,
         policy_engine: PolicyEngine,
+        user_interaction: UserInteraction,
         clock: Callable[[], float] = monotonic,
     ) -> None:
         self._model_client = model_client
@@ -146,6 +179,7 @@ class AgentRuntime:
         self._limits = limits
         self._workspace_resolver = workspace_resolver
         self._policy_engine = policy_engine
+        self._user_interaction = user_interaction
         self._clock = clock
         self.session = Session()
 
@@ -255,9 +289,9 @@ class AgentRuntime:
                 batch_stopped = True
                 continue
 
-            result = self._dispatch_local_tool_call(tool_call, agent_run)
-            results.append(result)
-            if result.outcome is not ToolOutcome.SUCCESS:
+            dispatch = self._dispatch_local_tool_call(tool_call, agent_run)
+            results.append(dispatch.result)
+            if dispatch.ends_batch:
                 batch_stopped = True
 
         return tuple(results)
@@ -350,7 +384,10 @@ class AgentRuntime:
         agent_run: AgentRun,
         run_started_at: float,
     ) -> None:
-        agent_run.active_duration_seconds = max(0.0, self._clock() - run_started_at)
+        agent_run.active_duration_seconds = max(
+            0.0,
+            self._clock() - run_started_at - agent_run.paused_duration_seconds,
+        )
 
     def _record_protocol_error(
         self,
@@ -413,13 +450,13 @@ class AgentRuntime:
         self,
         tool_call: ToolCall,
         agent_run: AgentRun,
-    ) -> ToolResult:
+    ) -> _ToolDispatchResult:
         agent_run.tool_call_attempts += 1
 
         try:
             tool = self._tool_registry.get(tool_call.name)
         except UnknownToolError:
-            return ToolResult(
+            return self._dispatch_result(ToolResult(
                 call_id=tool_call.call_id,
                 tool_name=tool_call.name,
                 outcome=ToolOutcome.VALIDATION_ERROR,
@@ -427,12 +464,12 @@ class AgentRuntime:
                     code="UNKNOWN_TOOL",
                     message=f"unknown tool: {tool_call.name}",
                 ),
-            )
+            ))
 
         try:
             arguments = tool.validate(tool_call.raw_arguments)
         except ValidationError as error:
-            return ToolResult(
+            return self._dispatch_result(ToolResult(
                 call_id=tool_call.call_id,
                 tool_name=tool_call.name,
                 outcome=ToolOutcome.VALIDATION_ERROR,
@@ -447,10 +484,10 @@ class AgentRuntime:
                         )
                     },
                 ),
-            )
+            ))
 
         if tool.spec.kind is not ToolKind.LOCAL or not isinstance(tool, LocalTool):
-            return ToolResult(
+            return self._dispatch_result(ToolResult(
                 call_id=tool_call.call_id,
                 tool_name=tool_call.name,
                 outcome=ToolOutcome.VALIDATION_ERROR,
@@ -458,26 +495,26 @@ class AgentRuntime:
                     code="UNSUPPORTED_TOOL_KIND",
                     message="Step 8 runtime only dispatches executable LOCAL tools",
                 ),
-            )
+            ))
 
         try:
             prepared = tool.prepare(tool_call.call_id, arguments)
         except Exception:
-            return self._operation_failure(
+            return self._dispatch_result(self._operation_failure(
                 tool_call.call_id,
                 tool_call.name,
                 ToolError(
                     code="INTERNAL_TOOL_ERROR",
                     message="local tool preparation failed unexpectedly",
                 ),
-            )
+            ))
 
         if isinstance(prepared, ToolError):
-            return self._operation_failure(
+            return self._dispatch_result(self._operation_failure(
                 tool_call.call_id,
                 tool_call.name,
                 prepared,
-            )
+            ))
 
         if (
             not isinstance(prepared, PreparedToolCall)
@@ -485,21 +522,21 @@ class AgentRuntime:
             or prepared.tool_identity != tool.spec
             or prepared.validated_arguments is not arguments
         ):
-            return self._operation_failure(
+            return self._dispatch_result(self._operation_failure(
                 tool_call.call_id,
                 tool_call.name,
                 ToolError(
                     code="INTERNAL_TOOL_ERROR",
                     message="local tool returned an invalid prepared action",
                 ),
-            )
+            ))
 
         constraint_result = self._policy_engine.check_explicit_constraints(
             prepared,
             agent_run.explicit_task_constraints,
         )
         if constraint_result.decision is ConstraintDecision.REJECT:
-            return ToolResult(
+            return self._dispatch_result(ToolResult(
                 call_id=tool_call.call_id,
                 tool_name=tool_call.name,
                 outcome=ToolOutcome.POLICY_REJECTED,
@@ -508,11 +545,11 @@ class AgentRuntime:
                     message=constraint_result.message
                     or "action violates an explicit task constraint",
                 ),
-            )
+            ))
 
         permission_result = self._policy_engine.check_risk_permission(prepared)
-        if permission_result.decision is not PermissionDecision.ALLOW:
-            return ToolResult(
+        if permission_result.decision is PermissionDecision.DENY:
+            return self._dispatch_result(ToolResult(
                 call_id=tool_call.call_id,
                 tool_name=tool_call.name,
                 outcome=ToolOutcome.POLICY_REJECTED,
@@ -526,37 +563,156 @@ class AgentRuntime:
                         "matched_rules": permission_result.matched_rules,
                     },
                 ),
+            ))
+
+        if permission_result.decision is PermissionDecision.CONFIRM:
+            return self._confirm_and_execute(
+                tool,
+                prepared,
+                permission_result,
+                agent_run,
             )
+
+        return self._execute_prepared(tool, prepared)
+
+    def _confirm_and_execute(
+        self,
+        tool: LocalTool,
+        prepared: PreparedToolCall,
+        permission_result: PermissionCheckResult,
+        agent_run: AgentRun,
+    ) -> _ToolDispatchResult:
+        pending = PendingAction(prepared, permission_result)
+        request = ConfirmationRequest(
+            call_id=prepared.call_id,
+            tool_name=prepared.tool_identity.name,
+            action_summary=self._action_summary(prepared),
+            reason_code=permission_result.reason_code or "RISK_PERMISSION",
+            risk_summary=permission_result.risk_summary or "Confirmation required",
+        )
+        agent_run.pending_action = pending
+        agent_run.pending_user_request = request
+        agent_run.wait_reason = WaitReason.PERMISSION_CONFIRMATION
+        agent_run.state = RunState.WAITING_FOR_USER
+        wait_started_at = self._clock()
+
+        try:
+            decision = self._user_interaction.confirm(request)
+        except KeyboardInterrupt:
+            decision = ConfirmationDecision.CANCEL
+        except UserInteractionError as error:
+            agent_run.last_error = error
+            agent_run.state = RunState.FAILED
+            agent_run.termination_reason = TerminationReason.USER_INTERACTION_FAILURE
+            agent_run.wait_reason = None
+            agent_run.pending_user_request = None
+            agent_run.pending_action = None
+            return self._dispatch_result(
+                ToolResult(
+                    call_id=prepared.call_id,
+                    tool_name=prepared.tool_identity.name,
+                    outcome=ToolOutcome.POLICY_REJECTED,
+                    error=ToolError(
+                        code="USER_INTERACTION_FAILURE",
+                        message="permission confirmation could not be completed",
+                    ),
+                )
+            )
+        finally:
+            agent_run.paused_duration_seconds += max(
+                0.0, self._clock() - wait_started_at
+            )
+
+        try:
+            if decision is ConfirmationDecision.APPROVE:
+                agent_run.state = RunState.RUNNING
+                return self._execute_prepared(tool, pending.prepared_call, ends_batch=True)
+            if decision is ConfirmationDecision.REJECT:
+                agent_run.state = RunState.RUNNING
+                return self._dispatch_result(
+                    ToolResult(
+                        call_id=prepared.call_id,
+                        tool_name=prepared.tool_identity.name,
+                        outcome=ToolOutcome.POLICY_REJECTED,
+                        error=ToolError(
+                            code="USER_REJECTED_CONFIRMATION",
+                            message="user rejected the exact prepared action",
+                        ),
+                    )
+                )
+            agent_run.state = RunState.CANCELLED
+            agent_run.termination_reason = TerminationReason.USER_CANCELLATION
+            return self._dispatch_result(
+                ToolResult(
+                    call_id=prepared.call_id,
+                    tool_name=prepared.tool_identity.name,
+                    outcome=ToolOutcome.POLICY_REJECTED,
+                    error=ToolError(
+                        code="USER_CANCELLED_CONFIRMATION",
+                        message="user cancelled during permission confirmation",
+                    ),
+                )
+            )
+        finally:
+            agent_run.wait_reason = None
+            agent_run.pending_user_request = None
+            agent_run.pending_action = None
+
+    def _execute_prepared(
+        self,
+        tool: LocalTool,
+        prepared: PreparedToolCall,
+        *,
+        ends_batch: bool = False,
+    ) -> _ToolDispatchResult:
 
         try:
             execution = tool.execute(prepared)
         except Exception:
-            return self._operation_failure(
-                tool_call.call_id,
-                tool_call.name,
+            return self._dispatch_result(self._operation_failure(
+                prepared.call_id,
+                prepared.tool_identity.name,
                 ToolError(
                     code="INTERNAL_TOOL_ERROR",
                     message="local tool execution failed unexpectedly",
                 ),
-            )
+            ))
 
         if not isinstance(execution, ToolExecutionResult):
-            return self._operation_failure(
-                tool_call.call_id,
-                tool_call.name,
+            return self._dispatch_result(self._operation_failure(
+                prepared.call_id,
+                prepared.tool_identity.name,
                 ToolError(
                     code="INTERNAL_TOOL_ERROR",
                     message="local tool returned an invalid execution result",
                 ),
-            )
+            ))
 
-        return ToolResult(
-            call_id=tool_call.call_id,
-            tool_name=tool_call.name,
+        return self._dispatch_result(ToolResult(
+            call_id=prepared.call_id,
+            tool_name=prepared.tool_identity.name,
             outcome=execution.outcome,
             content=execution.content,
             error=execution.error,
+        ), ends_batch=ends_batch)
+
+    @staticmethod
+    def _dispatch_result(
+        result: ToolResult,
+        *,
+        ends_batch: bool | None = None,
+    ) -> _ToolDispatchResult:
+        if ends_batch is None:
+            ends_batch = result.outcome is not ToolOutcome.SUCCESS
+        return _ToolDispatchResult(result=result, ends_batch=ends_batch)
+
+    @staticmethod
+    def _action_summary(prepared: PreparedToolCall) -> str:
+        arguments = prepared.validated_arguments.model_dump(mode="json")
+        rendered = ", ".join(
+            f"{key}={value!r}" for key, value in sorted(arguments.items())
         )
+        return f"{prepared.tool_identity.name}({rendered})"
 
     @staticmethod
     def _operation_failure(
@@ -615,6 +771,8 @@ __all__ = [
     "ModelProtocolError",
     "RuntimeLimits",
     "RunState",
+    "PendingAction",
     "Session",
     "TerminationReason",
+    "WaitReason",
 ]

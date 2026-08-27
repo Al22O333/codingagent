@@ -14,6 +14,7 @@ from coding_agent.constraints import (
     normalize_explicit_constraint_update,
 )
 from coding_agent.context import ContextManager
+from coding_agent.interaction import FakeUserInteraction
 from coding_agent.edit_file import EditFileArguments, EditFileTool
 from coding_agent.model_client import FakeModelClient
 from coding_agent.policy import PolicyEngine
@@ -58,6 +59,7 @@ def _runtime(
         TEST_LIMITS,
         workspace_resolver=resolver,
         policy_engine=PolicyEngine(),
+        user_interaction=FakeUserInteraction(),
     )
     run = runtime.run(task)
     result = context.build_messages()[2].results[0]  # type: ignore[union-attr]
@@ -237,6 +239,7 @@ def test_trusted_clarification_update_changes_same_run_snapshot(
         TEST_LIMITS,
         workspace_resolver=WorkspacePathResolver(workspace),
         policy_engine=PolicyEngine(),
+        user_interaction=FakeUserInteraction(),
     )
     run = AgentRun(run_id="active", current_task="Inspect the project")
     runtime.session._add_run(run)

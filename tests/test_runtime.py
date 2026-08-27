@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from coding_agent.context import ContextManager
+from coding_agent.interaction import FakeUserInteraction
 from coding_agent.model_client import FakeModelClient
 from coding_agent.policy import PolicyEngine
 from coding_agent.protocol import (
@@ -55,6 +56,7 @@ def test_valid_final_response_completes_run() -> None:
         ToolRegistry(),
         TEST_LIMITS,
         policy_engine=PolicyEngine(),
+        user_interaction=FakeUserInteraction(),
     )
 
     run = runtime.run("Complete the task")
@@ -84,6 +86,7 @@ def test_empty_no_tool_response_follows_protocol_error_path(
         ToolRegistry(),
         FAIL_FAST_PROTOCOL_LIMITS,
         policy_engine=PolicyEngine(),
+        user_interaction=FakeUserInteraction(),
     )
 
     run = runtime.run("Complete the task")
@@ -109,6 +112,7 @@ def test_session_keeps_sequential_runs_and_conversation_continuity() -> None:
         ToolRegistry(),
         TEST_LIMITS,
         policy_engine=PolicyEngine(),
+        user_interaction=FakeUserInteraction(),
     )
 
     first = runtime.run("First task")
@@ -137,6 +141,7 @@ def test_keyboard_interrupt_cancels_run_without_consuming_model_turn() -> None:
         ToolRegistry(),
         TEST_LIMITS,
         policy_engine=PolicyEngine(),
+        user_interaction=FakeUserInteraction(),
     )
 
     run = runtime.run("Complete the task")
@@ -185,6 +190,7 @@ def test_multiple_successful_tool_calls_are_processed_before_next_turn(
         registry,
         TEST_LIMITS,
         policy_engine=PolicyEngine(),
+        user_interaction=FakeUserInteraction(),
     )
 
     run = runtime.run("Inspect both files")

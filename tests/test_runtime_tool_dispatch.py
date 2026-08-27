@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from coding_agent.context import ContextManager
+from coding_agent.interaction import ConfirmationDecision, FakeUserInteraction
 from coding_agent.model_client import FakeModelClient
 from coding_agent.policy import PolicyEngine
 from coding_agent.protocol import (
@@ -58,6 +59,7 @@ def _runtime(
     responses: list[ModelResponse],
     *,
     observing: bool = False,
+    decisions: tuple[ConfirmationDecision, ...] = (),
 ) -> tuple[AgentRuntime, FakeModelClient, ContextManager]:
     context = ContextManager()
     resolver = WorkspacePathResolver(workspace)
@@ -76,6 +78,7 @@ def _runtime(
             registry,
             TEST_LIMITS,
             policy_engine=PolicyEngine(),
+            user_interaction=FakeUserInteraction(decisions),
         ),
         client,
         context,
@@ -230,7 +233,7 @@ def test_workspace_boundary_is_rejected_without_execution(tmp_path: Path) -> Non
     assert "secret" not in repr(result.content)
 
 
-def test_sensitive_path_is_not_auto_executed_before_confirmation_exists(
+def test_sensitive_path_rejection_does_not_execute(
     tmp_path: Path,
 ) -> None:
     workspace = tmp_path / "workspace"
@@ -247,6 +250,7 @@ def test_sensitive_path_is_not_auto_executed_before_confirmation_exists(
             ModelResponse(text=None, tool_calls=(call,)),
             ModelResponse(text="Confirmation is required."),
         ],
+        decisions=(ConfirmationDecision.REJECT,),
     )
 
     runtime.run("Inspect .env")
@@ -254,5 +258,5 @@ def test_sensitive_path_is_not_auto_executed_before_confirmation_exists(
     result = context.build_messages()[2].results[0]  # type: ignore[union-attr]
     assert result.outcome is ToolOutcome.POLICY_REJECTED
     assert result.error is not None
-    assert result.error.code == "SENSITIVE_PATH_CONFIRMATION"
+    assert result.error.code == "USER_REJECTED_CONFIRMATION"
     assert "TOKEN=secret" not in repr(result)
