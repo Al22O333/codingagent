@@ -19,6 +19,7 @@ from coding_agent.interaction import (
     ConfirmationDecision,
     ConfirmationRequest,
     FakeUserInteraction,
+    UserInteractionError,
 )
 from coding_agent.model_client import FakeModelClient
 from coding_agent.protocol import ModelResponse, ToolCall, ToolOutcome
@@ -191,6 +192,19 @@ def test_console_clarification_answer_and_eof() -> None:
     assert answered.status is ClarificationStatus.ANSWERED
     assert answered.answer == "src/main.py"
     assert cancelled.status is ClarificationStatus.CANCELLED
+
+
+def test_console_clarification_io_error_is_not_treated_as_cancellation() -> None:
+    class BrokenReader(StringIO):
+        def readline(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            raise OSError("terminal unavailable")
+
+    interaction = ConsoleUserInteraction(BrokenReader(), StringIO())
+
+    with pytest.raises(UserInteractionError) as raised:
+        interaction.ask(ClarificationRequest("ask", "Which file?"))
+
+    assert isinstance(raised.value.__cause__, OSError)
 
 
 def test_one_shot_main_starts_runtime_and_prints_final(

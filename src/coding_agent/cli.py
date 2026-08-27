@@ -22,6 +22,7 @@ from .interaction import (
     ConfirmationDecision,
     ConfirmationRequest,
     UserInteraction,
+    UserInteractionError,
 )
 from .model_client import ModelClient
 from .openai_client import OpenAICompatibleConfig, OpenAICompatibleModelClient
@@ -65,13 +66,16 @@ class ConsoleUserInteraction:
         self._stdout = stdout
 
     def confirm(self, request: ConfirmationRequest) -> ConfirmationDecision:
-        self._stdout.write(
-            f"Permission required: {request.action_summary}\n"
-            f"Risk: {request.risk_summary}\n"
-            "Approve this exact action? [y/N/c] "
-        )
-        self._stdout.flush()
-        answer = self._stdin.readline()
+        try:
+            self._stdout.write(
+                f"Permission required: {request.action_summary}\n"
+                f"Risk: {request.risk_summary}\n"
+                "Approve this exact action? [y/N/c] "
+            )
+            self._stdout.flush()
+            answer = self._stdin.readline()
+        except OSError as error:
+            raise UserInteractionError("terminal confirmation I/O failed") from error
         if answer == "":
             return ConfirmationDecision.CANCEL
         normalized = answer.strip().casefold()
@@ -82,9 +86,12 @@ class ConsoleUserInteraction:
         return ConfirmationDecision.REJECT
 
     def ask(self, request: ClarificationRequest) -> ClarificationResponse:
-        self._stdout.write(f"{request.question}\n> ")
-        self._stdout.flush()
-        answer = self._stdin.readline()
+        try:
+            self._stdout.write(f"{request.question}\n> ")
+            self._stdout.flush()
+            answer = self._stdin.readline()
+        except OSError as error:
+            raise UserInteractionError("terminal clarification I/O failed") from error
         if answer == "":
             return ClarificationResponse(ClarificationStatus.CANCELLED)
         return ClarificationResponse(

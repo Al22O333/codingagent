@@ -74,6 +74,7 @@ class TerminationReason(StrEnum):
     LIMIT_REACHED = "LIMIT_REACHED"
     USER_CANCELLATION = "USER_CANCELLATION"
     USER_INTERACTION_FAILURE = "USER_INTERACTION_FAILURE"
+    RUNTIME_FAILURE = "RUNTIME_FAILURE"
 
 
 class WaitReason(StrEnum):
@@ -191,7 +192,48 @@ class AgentRuntime:
         """Run one user task until a final response or current-slice failure."""
         agent_run = AgentRun(run_id=str(uuid4()), current_task=task)
         run_started_at = self._clock()
-        self.session._add_run(agent_run)
+        try:
+            self.session._add_run(agent_run)
+            return self._run_until_terminal(agent_run, task, run_started_at)
+        except KeyboardInterrupt:
+            self._terminate_run(
+                agent_run,
+                RunState.CANCELLED,
+                TerminationReason.USER_CANCELLATION,
+                run_started_at,
+            )
+        except UserInteractionError as error:
+            self._terminate_run(
+                agent_run,
+                RunState.FAILED,
+                TerminationReason.USER_INTERACTION_FAILURE,
+                run_started_at,
+                error,
+            )
+        except Exception as error:
+            self._terminate_run(
+                agent_run,
+                RunState.FAILED,
+                TerminationReason.RUNTIME_FAILURE,
+                run_started_at,
+                error,
+            )
+        finally:
+            if agent_run.state in {
+                RunState.COMPLETED,
+                RunState.FAILED,
+                RunState.CANCELLED,
+            }:
+                self._clear_pending_state(agent_run)
+        return agent_run
+
+    def _run_until_terminal(
+        self,
+        agent_run: AgentRun,
+        task: str,
+        run_started_at: float,
+    ) -> AgentRun:
+        """Execute the normal lifecycle beneath the public terminal boundary."""
         self._context_manager.record_user_message(UserMessage(text=task))
         self._apply_trusted_user_input(agent_run, task)
         corrective_feedback: SystemMessage | None = None
@@ -214,11 +256,6 @@ class AgentRuntime:
                     agent_run,
                     run_started_at,
                 )
-            except KeyboardInterrupt:
-                agent_run.state = RunState.CANCELLED
-                agent_run.termination_reason = TerminationReason.USER_CANCELLATION
-                self._refresh_active_duration(agent_run, run_started_at)
-                return agent_run
             except ModelProtocolError as error:
                 if self._record_protocol_error(
                     agent_run,
@@ -273,6 +310,26 @@ class AgentRuntime:
             return agent_run
 
         return agent_run
+
+    def _terminate_run(
+        self,
+        agent_run: AgentRun,
+        state: RunState,
+        reason: TerminationReason,
+        run_started_at: float,
+        error: Exception | None = None,
+    ) -> None:
+        agent_run.state = state
+        agent_run.termination_reason = reason
+        agent_run.last_error = error
+        self._clear_pending_state(agent_run)
+        self._refresh_active_duration(agent_run, run_started_at)
+
+    @staticmethod
+    def _clear_pending_state(agent_run: AgentRun) -> None:
+        agent_run.wait_reason = None
+        agent_run.pending_user_request = None
+        agent_run.pending_action = None
 
     def _execute_tool_batch(
         self,
@@ -613,22 +670,6 @@ class AgentRuntime:
             response = self._user_interaction.ask(request)
         except KeyboardInterrupt:
             response = None
-        except UserInteractionError as error:
-            agent_run.last_error = error
-            agent_run.state = RunState.FAILED
-            agent_run.termination_reason = TerminationReason.USER_INTERACTION_FAILURE
-            agent_run.wait_reason = None
-            agent_run.pending_user_request = None
-            return self._dispatch_result(
-                self._operation_failure(
-                    tool_call.call_id,
-                    tool_call.name,
-                    ToolError(
-                        code="USER_INTERACTION_FAILURE",
-                        message="clarification could not be completed",
-                    ),
-                )
-            )
         finally:
             agent_run.paused_duration_seconds += max(
                 0.0, self._clock() - wait_started_at
@@ -689,24 +730,6 @@ class AgentRuntime:
             decision = self._user_interaction.confirm(request)
         except KeyboardInterrupt:
             decision = ConfirmationDecision.CANCEL
-        except UserInteractionError as error:
-            agent_run.last_error = error
-            agent_run.state = RunState.FAILED
-            agent_run.termination_reason = TerminationReason.USER_INTERACTION_FAILURE
-            agent_run.wait_reason = None
-            agent_run.pending_user_request = None
-            agent_run.pending_action = None
-            return self._dispatch_result(
-                ToolResult(
-                    call_id=prepared.call_id,
-                    tool_name=prepared.tool_identity.name,
-                    outcome=ToolOutcome.POLICY_REJECTED,
-                    error=ToolError(
-                        code="USER_INTERACTION_FAILURE",
-                        message="permission confirmation could not be completed",
-                    ),
-                )
-            )
         finally:
             agent_run.paused_duration_seconds += max(
                 0.0, self._clock() - wait_started_at
@@ -743,9 +766,7 @@ class AgentRuntime:
                 )
             )
         finally:
-            agent_run.wait_reason = None
-            agent_run.pending_user_request = None
-            agent_run.pending_action = None
+            self._clear_pending_state(agent_run)
 
     def _execute_prepared(
         self,
