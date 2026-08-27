@@ -118,21 +118,17 @@ class AgentRuntime:
             agent_run.model_turns += 1
 
             if response.tool_calls:
-                if len(response.tool_calls) != 1:
-                    raise NotImplementedError(
-                        "multi-tool responses are outside Step 8 scope"
-                    )
                 assistant_message = AssistantMessage(
                     text=response.text,
                     tool_calls=response.tool_calls,
                 )
                 self._context_manager.record_assistant_message(assistant_message)
-                tool_result = self._dispatch_local_tool_call(
-                    response.tool_calls[0],
+                tool_results = self._execute_tool_batch(
+                    response.tool_calls,
                     agent_run,
                 )
                 self._context_manager.record_tool_result_message(
-                    ToolResultMessage(results=(tool_result,))
+                    ToolResultMessage(results=tool_results)
                 )
                 continue
 
@@ -154,6 +150,39 @@ class AgentRuntime:
             return agent_run
 
         return agent_run
+
+    def _execute_tool_batch(
+        self,
+        tool_calls: tuple[ToolCall, ...],
+        agent_run: AgentRun,
+    ) -> tuple[ToolResult, ...]:
+        results: list[ToolResult] = []
+        batch_stopped = False
+
+        for tool_call in tool_calls:
+            if batch_stopped:
+                results.append(
+                    ToolResult(
+                        call_id=tool_call.call_id,
+                        tool_name=tool_call.name,
+                        outcome=ToolOutcome.NOT_EXECUTED,
+                        error=ToolError(
+                            code="BATCH_ABORTED",
+                            message=(
+                                "tool call was not executed because an earlier "
+                                "call ended the batch"
+                            ),
+                        ),
+                    )
+                )
+                continue
+
+            result = self._dispatch_local_tool_call(tool_call, agent_run)
+            results.append(result)
+            if result.outcome is not ToolOutcome.SUCCESS:
+                batch_stopped = True
+
+        return tuple(results)
 
     def _dispatch_local_tool_call(
         self,

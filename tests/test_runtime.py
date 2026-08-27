@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from coding_agent.context import ContextManager
@@ -11,8 +13,10 @@ from coding_agent.protocol import (
     ModelRequest,
     ModelResponse,
     ToolCall,
+    ToolOutcome,
     UserMessage,
 )
+from coding_agent.read_file import ReadFileTool
 from coding_agent.runtime import (
     AgentRuntime,
     ModelProtocolError,
@@ -20,6 +24,7 @@ from coding_agent.runtime import (
     TerminationReason,
 )
 from coding_agent.tooling import ToolRegistry
+from coding_agent.workspace import WorkspacePathResolver
 
 
 def test_valid_final_response_completes_run() -> None:
@@ -101,7 +106,13 @@ def test_keyboard_interrupt_cancels_run_without_consuming_model_turn() -> None:
     assert context.build_messages() == (UserMessage("Complete the task"),)
 
 
-def test_multi_tool_turn_is_not_implemented_before_step_9() -> None:
+def test_multiple_successful_tool_calls_are_processed_before_next_turn(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "main.py").write_text("main", encoding="utf-8")
+    (workspace / "other.py").write_text("other", encoding="utf-8")
     first_call = ToolCall(
         call_id="call-1", name="read_file", raw_arguments={"path": "main.py"}
     )
@@ -113,13 +124,27 @@ def test_multi_tool_turn_is_not_implemented_before_step_9() -> None:
             ModelResponse(
                 text="I will inspect them.",
                 tool_calls=(first_call, second_call),
-            )
+            ),
+            ModelResponse(text="Both files were read."),
         ]
     )
     context = ContextManager()
-    runtime = AgentRuntime(client, context, ToolRegistry())
+    registry = ToolRegistry()
+    registry.register(
+        ReadFileTool(
+            WorkspacePathResolver(workspace),
+            max_lines=10,
+            max_bytes=1024,
+        )
+    )
+    runtime = AgentRuntime(client, context, registry)
 
-    with pytest.raises(NotImplementedError, match="outside Step 8 scope"):
-        runtime.run("Inspect both files")
+    run = runtime.run("Inspect both files")
 
-    assert context.build_messages() == (UserMessage("Inspect both files"),)
+    results = context.build_messages()[2].results  # type: ignore[union-attr]
+    assert [result.outcome for result in results] == [
+        ToolOutcome.SUCCESS,
+        ToolOutcome.SUCCESS,
+    ]
+    assert run.tool_call_attempts == 2
+    assert run.state is RunState.COMPLETED
