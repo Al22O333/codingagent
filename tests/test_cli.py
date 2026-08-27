@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import os
+import shlex
+import subprocess
+import sys
 from io import StringIO
 from pathlib import Path
 
@@ -20,10 +23,18 @@ from coding_agent.interaction import (
 from coding_agent.model_client import FakeModelClient
 from coding_agent.protocol import ModelResponse, ToolCall, ToolOutcome
 from coding_agent.runtime import RunState
+from coding_agent.shell import ShellContent
 
 
 def _config(workspace: Path) -> CLIConfig:
     return CLIConfig(workspace=workspace, model="test-model", api_key="test-key")
+
+
+def _python_command(source: str) -> str:
+    arguments = [sys.executable, "-c", source]
+    if os.name == "nt":
+        return subprocess.list2cmdline(arguments)
+    return shlex.join(arguments)
 
 
 def test_config_loads_minimal_environment_without_exposing_secret(tmp_path: Path) -> None:
@@ -103,6 +114,53 @@ def test_composed_runtime_executes_real_read_file_tool(tmp_path: Path) -> None:
     result_message = client.requests[1].messages[-1]
     assert result_message.results[0].outcome is ToolOutcome.SUCCESS  # type: ignore[union-attr]
     assert "answer = 42" in repr(result_message.results[0].content)  # type: ignore[union-attr]
+
+
+def test_composition_filters_runtime_secrets_but_preserves_ordinary_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "super-secret-test-key"
+    monkeypatch.setenv("CODING_AGENT_TEST_API_KEY", secret)
+    monkeypatch.setenv("CODING_AGENT_API_KEY", "default-agent-secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "default-openai-secret")
+    monkeypatch.setenv("CODING_AGENT_NORMAL_TEST_VAR", "hello")
+    source = (
+        "print([__import__('os').environ.get(name, 'missing') for name in "
+        "['CODING_AGENT_TEST_API_KEY', 'CODING_AGENT_API_KEY', "
+        "'OPENAI_API_KEY', 'CODING_AGENT_NORMAL_TEST_VAR']])"
+    )
+    call = ToolCall("shell", "shell", {"command": _python_command(source)})
+    client = FakeModelClient(
+        [
+            ModelResponse(text=None, tool_calls=(call,)),
+            ModelResponse(text="Environment checked."),
+        ]
+    )
+    config = CLIConfig(
+        workspace=tmp_path,
+        model="test-model",
+        api_key=secret,
+        api_key_environment_name="CODING_AGENT_TEST_API_KEY",
+    )
+
+    runtime = build_runtime(
+        config,
+        model_client=client,
+        user_interaction=FakeUserInteraction(),
+    )
+    run = runtime.run("Check the child process environment")
+
+    assert run.state is RunState.COMPLETED
+    result_message = client.requests[1].messages[-1]
+    result = result_message.results[0]  # type: ignore[union-attr]
+    assert result.outcome is ToolOutcome.SUCCESS
+    assert isinstance(result.content, ShellContent)
+    assert result.content.stdout.count("missing") == 3
+    assert "hello" in result.content.stdout
+    assert secret not in result.content.stdout
+    assert "default-agent-secret" not in result.content.stdout
+    assert "default-openai-secret" not in result.content.stdout
 
 
 @pytest.mark.parametrize(

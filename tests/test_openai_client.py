@@ -263,3 +263,13 @@ def test_config_rejects_missing_required_values() -> None:
         OpenAICompatibleConfig(model="", api_key="key")
     with pytest.raises(ValueError):
         OpenAICompatibleConfig(model="model", api_key="")
+
+
+def test_config_repr_does_not_expose_api_key() -> None:
+    secret = "super-secret-test-key"
+    config = OpenAICompatibleConfig(model="test-model", api_key=secret)
+
+    representation = repr(config)
+
+    assert secret not in representation
+    assert "test-model" in representation

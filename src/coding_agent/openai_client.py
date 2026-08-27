@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
 from typing import Any
 from uuid import uuid4
@@ -41,7 +41,7 @@ from .protocol import (
 @dataclass(frozen=True, slots=True)
 class OpenAICompatibleConfig:
     model: str
-    api_key: str
+    api_key: str = field(repr=False)
     base_url: str | None = None
     timeout_seconds: float = 60.0
 

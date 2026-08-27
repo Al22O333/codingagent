@@ -101,6 +101,7 @@ def test_real_model_completes_inspect_edit_verify_workflow(tmp_path: Path) -> No
             model=_MODEL,
             api_key=_API_KEY,
             base_url=_BASE_URL,
+            api_key_environment_name="CODING_AGENT_TEST_API_KEY",
         ),
         model_client=recording_client,
         user_interaction=DiagnosticInteraction(),

@@ -35,6 +35,9 @@ from .workspace import WorkspacePathResolver
 
 
 STARTUP_MESSAGE = "Coding Agent v1"
+_DEFAULT_SECRET_ENVIRONMENT_NAMES = frozenset(
+    {"CODING_AGENT_API_KEY", "OPENAI_API_KEY"}
+)
 
 
 def _default_shell_executable() -> str:
@@ -50,6 +53,7 @@ class CLIConfig:
     api_key: str = field(repr=False)
     base_url: str | None = None
     shell_executable: str = field(default_factory=_default_shell_executable)
+    api_key_environment_name: str = "CODING_AGENT_API_KEY"
 
 
 class ConsoleUserInteraction:
@@ -134,8 +138,9 @@ def build_runtime(
             default_timeout_seconds=60,
             max_stdout_bytes=64 * 1024,
             max_stderr_bytes=64 * 1024,
-            excluded_environment_names=frozenset(
-                {"CODING_AGENT_API_KEY", "OPENAI_API_KEY"}
+            excluded_environment_names=(
+                _DEFAULT_SECRET_ENVIRONMENT_NAMES
+                | {config.api_key_environment_name}
             ),
         ),
         AskUserTool(),
