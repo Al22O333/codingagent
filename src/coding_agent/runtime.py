@@ -10,6 +10,13 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
+from .constraints import (
+    ConstraintDecision,
+    ExplicitConstraintSnapshot,
+    apply_constraint_update,
+    check_explicit_constraints,
+    normalize_explicit_constraint_update,
+)
 from .context import ContextManager
 from .model_client import (
     FatalProviderError,
@@ -38,7 +45,7 @@ from .tooling import (
     ToolRegistry,
     UnknownToolError,
 )
-from .workspace import FileOperationFacts, ResolvedPath
+from .workspace import FileOperationFacts, ResolvedPath, WorkspacePathResolver
 
 
 class RunState(StrEnum):
@@ -97,6 +104,11 @@ class AgentRun:
     termination_reason: TerminationReason | None = None
     limit_reached: str | None = None
     last_error: Exception | None = None
+    explicit_user_clarifications: list[str] = field(default_factory=list)
+    explicit_scope_updates: list[str] = field(default_factory=list)
+    explicit_task_constraints: ExplicitConstraintSnapshot = field(
+        default_factory=ExplicitConstraintSnapshot
+    )
 
 
 @dataclass(slots=True)
@@ -124,6 +136,7 @@ class AgentRuntime:
         context_manager: ContextManager,
         tool_registry: ToolRegistry,
         limits: RuntimeLimits,
+        workspace_resolver: WorkspacePathResolver | None = None,
         *,
         clock: Callable[[], float] = monotonic,
     ) -> None:
@@ -131,6 +144,7 @@ class AgentRuntime:
         self._context_manager = context_manager
         self._tool_registry = tool_registry
         self._limits = limits
+        self._workspace_resolver = workspace_resolver
         self._clock = clock
         self.session = Session()
 
@@ -140,6 +154,7 @@ class AgentRuntime:
         run_started_at = self._clock()
         self.session._add_run(agent_run)
         self._context_manager.record_user_message(UserMessage(text=task))
+        self._apply_trusted_user_input(agent_run, task)
         corrective_feedback: SystemMessage | None = None
 
         while agent_run.state is RunState.RUNNING:
@@ -478,6 +493,22 @@ class AgentRuntime:
                 ),
             )
 
+        constraint_result = check_explicit_constraints(
+            prepared,
+            agent_run.explicit_task_constraints,
+        )
+        if constraint_result.decision is ConstraintDecision.REJECT:
+            return ToolResult(
+                call_id=tool_call.call_id,
+                tool_name=tool_call.name,
+                outcome=ToolOutcome.POLICY_REJECTED,
+                error=ToolError(
+                    code=constraint_result.reason_code or "EXPLICIT_TASK_CONSTRAINT",
+                    message=constraint_result.message
+                    or "action violates an explicit task constraint",
+                ),
+            )
+
         policy_rejection = self._minimal_file_policy(tool_call, prepared)
         if policy_rejection is not None:
             return policy_rejection
@@ -556,6 +587,44 @@ class AgentRuntime:
             outcome=ToolOutcome.OPERATION_FAILURE,
             error=error,
         )
+
+    def apply_user_clarification(
+        self,
+        agent_run: AgentRun,
+        answer: str,
+    ) -> bool:
+        """Apply one trusted same-Run user answer through the closed normalizer."""
+        if agent_run not in self.session.runs:
+            raise ValueError("clarification target is not owned by this Session")
+        if agent_run.state is not RunState.RUNNING:
+            raise ValueError("clarification target is not an active Agent Run")
+        agent_run.explicit_user_clarifications.append(answer)
+        return self._apply_trusted_user_input(
+            agent_run,
+            answer,
+            record_scope_update=True,
+        )
+
+    def _apply_trusted_user_input(
+        self,
+        agent_run: AgentRun,
+        user_input: str,
+        *,
+        record_scope_update: bool = False,
+    ) -> bool:
+        update = normalize_explicit_constraint_update(
+            user_input,
+            self._workspace_resolver,
+        )
+        if update is None:
+            return False
+        agent_run.explicit_task_constraints = apply_constraint_update(
+            agent_run.explicit_task_constraints,
+            update,
+        )
+        if record_scope_update and update.write_scopes is not None:
+            agent_run.explicit_scope_updates.append(user_input)
+        return True
 
 __all__ = [
     "AgentRun",
