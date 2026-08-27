@@ -8,7 +8,13 @@ from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel, ConfigDict
 
-from coding_agent.protocol import ToolCapability, ToolKind, ToolSpec
+from coding_agent.protocol import (
+    ToolCapability,
+    ToolError,
+    ToolKind,
+    ToolOutcome,
+    ToolSpec,
+)
 
 
 class ToolArguments(BaseModel):
@@ -51,6 +57,28 @@ class Tool(Generic[ArgumentsT]):
     def validate(self, raw_arguments: object) -> ArgumentsT:
         """Validate untrusted model arguments into a typed immutable value."""
         return self.argument_model.model_validate(raw_arguments)
+
+
+@dataclass(frozen=True, slots=True)
+class ToolExecutionResult:
+    """Execution-level result returned by a LOCAL Tool."""
+
+    outcome: ToolOutcome
+    content: object | None = None
+    error: ToolError | None = None
+
+    def __post_init__(self) -> None:
+        allowed_outcomes = {
+            ToolOutcome.SUCCESS,
+            ToolOutcome.OPERATION_FAILURE,
+            ToolOutcome.UNSUCCESSFUL_COMMAND,
+        }
+        if self.outcome not in allowed_outcomes:
+            raise ValueError("invalid LOCAL Tool execution outcome")
+        if self.outcome is ToolOutcome.SUCCESS and self.error is not None:
+            raise ValueError("successful execution must not contain ToolError")
+        if self.outcome is ToolOutcome.OPERATION_FAILURE and self.error is None:
+            raise ValueError("operation failure must contain ToolError")
 
 
 class ToolRegistryError(ValueError):
@@ -129,6 +157,7 @@ __all__ = [
     "InvalidToolSpecError",
     "Tool",
     "ToolArguments",
+    "ToolExecutionResult",
     "ToolRegistry",
     "ToolRegistryError",
     "UnknownToolError",
