@@ -14,7 +14,6 @@ from .constraints import (
     ConstraintDecision,
     ExplicitConstraintSnapshot,
     apply_constraint_update,
-    check_explicit_constraints,
     normalize_explicit_constraint_update,
 )
 from .context import ContextManager
@@ -24,6 +23,7 @@ from .model_client import (
     ModelProtocolError,
     TransientProviderError,
 )
+from .policy import PermissionDecision, PolicyEngine
 from .protocol import (
     AssistantMessage,
     ModelRequest,
@@ -37,7 +37,6 @@ from .protocol import (
     SystemMessage,
     UserMessage,
 )
-from .shell import ShellOperationFacts
 from .tooling import (
     LocalTool,
     PreparedToolCall,
@@ -45,7 +44,7 @@ from .tooling import (
     ToolRegistry,
     UnknownToolError,
 )
-from .workspace import FileOperationFacts, ResolvedPath, WorkspacePathResolver
+from .workspace import WorkspacePathResolver
 
 
 class RunState(StrEnum):
@@ -138,6 +137,7 @@ class AgentRuntime:
         limits: RuntimeLimits,
         workspace_resolver: WorkspacePathResolver | None = None,
         *,
+        policy_engine: PolicyEngine,
         clock: Callable[[], float] = monotonic,
     ) -> None:
         self._model_client = model_client
@@ -145,6 +145,7 @@ class AgentRuntime:
         self._tool_registry = tool_registry
         self._limits = limits
         self._workspace_resolver = workspace_resolver
+        self._policy_engine = policy_engine
         self._clock = clock
         self.session = Session()
 
@@ -493,7 +494,7 @@ class AgentRuntime:
                 ),
             )
 
-        constraint_result = check_explicit_constraints(
+        constraint_result = self._policy_engine.check_explicit_constraints(
             prepared,
             agent_run.explicit_task_constraints,
         )
@@ -509,9 +510,23 @@ class AgentRuntime:
                 ),
             )
 
-        policy_rejection = self._minimal_file_policy(tool_call, prepared)
-        if policy_rejection is not None:
-            return policy_rejection
+        permission_result = self._policy_engine.check_risk_permission(prepared)
+        if permission_result.decision is not PermissionDecision.ALLOW:
+            return ToolResult(
+                call_id=tool_call.call_id,
+                tool_name=tool_call.name,
+                outcome=ToolOutcome.POLICY_REJECTED,
+                error=ToolError(
+                    code=permission_result.reason_code or "RISK_PERMISSION",
+                    message=permission_result.message
+                    or "action did not pass Risk Permission",
+                    details={
+                        "permission_decision": permission_result.decision.value,
+                        "risk_summary": permission_result.risk_summary,
+                        "matched_rules": permission_result.matched_rules,
+                    },
+                ),
+            )
 
         try:
             execution = tool.execute(prepared)
@@ -541,38 +556,6 @@ class AgentRuntime:
             outcome=execution.outcome,
             content=execution.content,
             error=execution.error,
-        )
-
-    @staticmethod
-    def _minimal_file_policy(
-        tool_call: ToolCall,
-        prepared: PreparedToolCall,
-    ) -> ToolResult | None:
-        operation_facts = prepared.operation_facts
-        if isinstance(operation_facts, FileOperationFacts):
-            resolved = operation_facts.target
-        elif isinstance(operation_facts, ShellOperationFacts):
-            resolved = operation_facts.cwd
-        else:
-            return None
-        if not isinstance(resolved, ResolvedPath):
-            return None
-        if not resolved.is_within_workspace:
-            code = "WORKSPACE_BOUNDARY"
-            message = "File Tool access outside the workspace is prohibited"
-        elif resolved.is_sensitive:
-            code = "SENSITIVE_PATH_CONFIRMATION_REQUIRED"
-            message = "Sensitive Path access requires explicit user confirmation"
-        elif resolved.is_protected:
-            code = "PROTECTED_PATH_CONFIRMATION_REQUIRED"
-            message = "Protected Path access requires explicit user confirmation"
-        else:
-            return None
-        return ToolResult(
-            call_id=tool_call.call_id,
-            tool_name=tool_call.name,
-            outcome=ToolOutcome.POLICY_REJECTED,
-            error=ToolError(code=code, message=message),
         )
 
     @staticmethod

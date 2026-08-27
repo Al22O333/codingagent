@@ -13,6 +13,7 @@ from coding_agent.model_client import (
     ModelProtocolError,
     TransientProviderError,
 )
+from coding_agent.policy import PolicyEngine
 from coding_agent.protocol import (
     AssistantMessage,
     ModelRequest,
@@ -73,6 +74,7 @@ def test_transport_retry_reuses_same_request_without_extra_model_turn() -> None:
         ContextManager(),
         _registry(),
         _limits(transport_retries=1),
+        policy_engine=PolicyEngine(),
     )
 
     run = runtime.run("Complete the task")
@@ -92,6 +94,7 @@ def test_transport_retry_exhaustion_fails_without_model_turn() -> None:
         ContextManager(),
         _registry(),
         _limits(transport_retries=1),
+        policy_engine=PolicyEngine(),
     )
 
     run = runtime.run("Complete the task")
@@ -112,6 +115,7 @@ def test_fatal_provider_error_is_not_retried() -> None:
         ContextManager(),
         _registry(),
         _limits(transport_retries=3),
+        policy_engine=PolicyEngine(),
     )
 
     run = runtime.run("Complete the task")
@@ -132,6 +136,7 @@ def test_invalid_response_consumes_turn_and_corrective_response_consumes_another
         context,
         _registry(),
         _limits(protocol_errors=2),
+        policy_engine=PolicyEngine(),
     )
 
     run = runtime.run("Complete the task")
@@ -156,6 +161,7 @@ def test_model_client_protocol_error_uses_corrective_reprompt() -> None:
         ContextManager(),
         _registry(),
         _limits(protocol_errors=2),
+        policy_engine=PolicyEngine(),
     )
 
     run = runtime.run("Complete the task")
@@ -179,6 +185,7 @@ def test_protocol_error_limit_exhaustion_stops_without_next_turn() -> None:
         context,
         _registry(),
         _limits(protocol_errors=2),
+        policy_engine=PolicyEngine(),
     )
 
     run = runtime.run("Complete the task")
@@ -213,6 +220,7 @@ def test_model_turn_budget_stops_before_requesting_another_turn(
         ContextManager(),
         _registry(workspace),
         _limits(model_turns=1),
+        policy_engine=PolicyEngine(),
     )
 
     run = runtime.run("Inspect main.py")
@@ -251,6 +259,7 @@ def test_tool_attempt_budget_marks_remaining_calls_not_executed(
         context,
         _registry(workspace),
         _limits(tool_attempts=1),
+        policy_engine=PolicyEngine(),
     )
 
     run = runtime.run("Read two files")
@@ -307,6 +316,7 @@ def test_active_duration_limit_stops_before_tool_execution(tmp_path: Path) -> No
         context,
         _registry(workspace),
         _limits(active_seconds=1),
+        policy_engine=PolicyEngine(),
         clock=clock,
     )
 

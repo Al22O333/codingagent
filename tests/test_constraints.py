@@ -16,6 +16,7 @@ from coding_agent.constraints import (
 from coding_agent.context import ContextManager
 from coding_agent.edit_file import EditFileArguments, EditFileTool
 from coding_agent.model_client import FakeModelClient
+from coding_agent.policy import PolicyEngine
 from coding_agent.protocol import ModelResponse, ToolCall, ToolOutcome
 from coding_agent.runtime import AgentRun, AgentRuntime, RuntimeLimits
 from coding_agent.shell import ShellBackend, ShellTool
@@ -56,6 +57,7 @@ def _runtime(
         registry,
         TEST_LIMITS,
         workspace_resolver=resolver,
+        policy_engine=PolicyEngine(),
     )
     run = runtime.run(task)
     result = context.build_messages()[2].results[0]  # type: ignore[union-attr]
@@ -234,6 +236,7 @@ def test_trusted_clarification_update_changes_same_run_snapshot(
         registry,
         TEST_LIMITS,
         workspace_resolver=WorkspacePathResolver(workspace),
+        policy_engine=PolicyEngine(),
     )
     run = AgentRun(run_id="active", current_task="Inspect the project")
     runtime.session._add_run(run)

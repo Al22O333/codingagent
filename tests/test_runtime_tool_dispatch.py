@@ -6,6 +6,7 @@ from pathlib import Path
 
 from coding_agent.context import ContextManager
 from coding_agent.model_client import FakeModelClient
+from coding_agent.policy import PolicyEngine
 from coding_agent.protocol import (
     AssistantMessage,
     ModelResponse,
@@ -68,7 +69,17 @@ def _runtime(
     registry = ToolRegistry()
     registry.register(tool)
     client = FakeModelClient(responses)
-    return AgentRuntime(client, context, registry, TEST_LIMITS), client, context
+    return (
+        AgentRuntime(
+            client,
+            context,
+            registry,
+            TEST_LIMITS,
+            policy_engine=PolicyEngine(),
+        ),
+        client,
+        context,
+    )
 
 
 def test_read_file_tool_loop_reaches_final_response(tmp_path: Path) -> None:
@@ -243,5 +254,5 @@ def test_sensitive_path_is_not_auto_executed_before_confirmation_exists(
     result = context.build_messages()[2].results[0]  # type: ignore[union-attr]
     assert result.outcome is ToolOutcome.POLICY_REJECTED
     assert result.error is not None
-    assert result.error.code == "SENSITIVE_PATH_CONFIRMATION_REQUIRED"
+    assert result.error.code == "SENSITIVE_PATH_CONFIRMATION"
     assert "TOKEN=secret" not in repr(result)
