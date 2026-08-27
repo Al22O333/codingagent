@@ -255,7 +255,7 @@ class AgentRuntime:
         run_started_at: float,
     ) -> AgentRun:
         """Execute the normal lifecycle beneath the public terminal boundary."""
-        self._context_manager.record_user_message(UserMessage(text=task))
+        self._context_manager.start_run(UserMessage(text=task))
         self._apply_trusted_user_input(agent_run, task)
         corrective_feedback: SystemMessage | None = None
 
@@ -263,9 +263,10 @@ class AgentRuntime:
             if self._model_budget_exhausted(agent_run, run_started_at):
                 return agent_run
 
-            messages = self._context_manager.build_messages()
-            if corrective_feedback is not None:
-                messages = messages + (corrective_feedback,)
+            additional_messages = (
+                (corrective_feedback,) if corrective_feedback is not None else ()
+            )
+            messages = self._context_manager.build_messages(additional_messages)
             request = ModelRequest(
                 messages=messages,
                 tools=self._tool_registry.specs(),

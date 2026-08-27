@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from coding_agent.context import ContextManager, ContextOrderError
+from coding_agent.context import ContextLimitError, ContextManager, ContextOrderError
 from coding_agent.protocol import (
     AssistantMessage,
     ToolCall,
@@ -100,3 +100,107 @@ def test_duplicate_call_ids_are_rejected_before_recording() -> None:
         context.record_assistant_message(assistant)
 
     assert context.build_messages() == ()
+
+
+def test_new_run_keeps_only_bounded_task_and_final_continuity() -> None:
+    context = ContextManager(max_retained_completed_runs=1)
+    old_call = AssistantMessage(text=None, tool_calls=(_tool_call("old-call"),))
+    old_result = ToolResultMessage(results=(_tool_result("old-call"),))
+
+    context.start_run(UserMessage("First task"))
+    context.record_assistant_message(old_call)
+    context.record_tool_result_message(old_result)
+    context.record_assistant_message(AssistantMessage("First final"))
+    context.start_run(UserMessage("Second task"))
+
+    assert context.build_messages() == (
+        UserMessage("First task"),
+        AssistantMessage("First final"),
+        UserMessage("Second task"),
+    )
+    assert old_call not in context.build_messages()
+    assert old_result not in context.build_messages()
+
+
+def test_completed_run_continuity_is_bounded() -> None:
+    context = ContextManager(max_retained_completed_runs=1)
+    for number in range(3):
+        context.start_run(UserMessage(f"Task {number}"))
+        context.record_assistant_message(AssistantMessage(f"Final {number}"))
+
+    context.start_run(UserMessage("Current task"))
+
+    assert context.build_messages() == (
+        UserMessage("Task 2"),
+        AssistantMessage("Final 2"),
+        UserMessage("Current task"),
+    )
+
+
+def test_trimming_drops_old_tool_groups_atomically_and_keeps_latest() -> None:
+    context = ContextManager(max_context_chars=750)
+    task = UserMessage("Current task")
+    first_call = AssistantMessage(
+        None, (_tool_call("call-a"), _tool_call("call-b"))
+    )
+    first_results = ToolResultMessage(
+        (_tool_result("call-a"), _tool_result("call-b"))
+    )
+    second_call = AssistantMessage(None, (_tool_call("call-c"),))
+    second_result = ToolResultMessage((_tool_result("call-c"),))
+    context.start_run(task)
+    context.record_assistant_message(first_call)
+    context.record_tool_result_message(first_results)
+    context.record_assistant_message(second_call)
+    context.record_tool_result_message(second_result)
+
+    messages = context.build_messages()
+
+    assert task in messages
+    assert first_call not in messages
+    assert first_results not in messages
+    assert messages[-2:] == (second_call, second_result)
+    assert sum(len(repr(message)) for message in messages) <= 750
+
+
+def test_mandatory_context_that_cannot_fit_fails_without_dropping_task() -> None:
+    context = ContextManager(max_context_chars=50)
+    task = UserMessage("x" * 100)
+    context.start_run(task)
+
+    with pytest.raises(ContextLimitError, match="mandatory model-visible context"):
+        context.build_messages()
+
+    assert context._messages == [task]
+
+
+def test_large_latest_tool_result_is_visible_after_older_group_is_evicted() -> None:
+    task = UserMessage("Inspect the latest result")
+    old_call = AssistantMessage(None, (_tool_call("old"),))
+    old_result = ToolResultMessage(
+        (_tool_result_with_text("old", "o" * 500),)
+    )
+    latest_call = AssistantMessage(None, (_tool_call("latest"),))
+    latest_result = ToolResultMessage(
+        (_tool_result_with_text("latest", "n" * 500),)
+    )
+    mandatory_size = sum(
+        len(repr(message)) for message in (task, latest_call, latest_result)
+    )
+    context = ContextManager(max_context_chars=mandatory_size)
+    context.start_run(task)
+    context.record_assistant_message(old_call)
+    context.record_tool_result_message(old_result)
+    context.record_assistant_message(latest_call)
+    context.record_tool_result_message(latest_result)
+
+    assert context.build_messages() == (task, latest_call, latest_result)
+
+
+def _tool_result_with_text(call_id: str, text: str) -> ToolResult:
+    return ToolResult(
+        call_id=call_id,
+        tool_name="read_file",
+        outcome=ToolOutcome.SUCCESS,
+        content={"text": text},
+    )

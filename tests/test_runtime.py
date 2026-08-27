@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from coding_agent.context import ContextManager
+from coding_agent.context import ContextLimitError, ContextManager
 from coding_agent.interaction import FakeUserInteraction
 from coding_agent.model_client import FakeModelClient
 from coding_agent.policy import PolicyEngine
@@ -126,6 +126,80 @@ def test_session_keeps_sequential_runs_and_conversation_continuity() -> None:
         UserMessage("Second task"),
     )
     assert second.state is RunState.COMPLETED
+
+
+def test_second_run_does_not_receive_stale_tool_observation(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "a.py"
+    target.write_text("old content", encoding="utf-8")
+    call = ToolCall(
+        call_id="old-read",
+        name="read_file",
+        raw_arguments={"path": "a.py"},
+    )
+    client = FakeModelClient(
+        [
+            ModelResponse(text=None, tool_calls=(call,)),
+            ModelResponse(text="First final."),
+            ModelResponse(text="Second final."),
+        ]
+    )
+    context = ContextManager()
+    registry = ToolRegistry()
+    registry.register(
+        ReadFileTool(
+            WorkspacePathResolver(workspace),
+            max_lines=10,
+            max_bytes=1024,
+        )
+    )
+    runtime = AgentRuntime(
+        client,
+        context,
+        registry,
+        TEST_LIMITS,
+        policy_engine=PolicyEngine(),
+        user_interaction=FakeUserInteraction(),
+    )
+
+    first = runtime.run("Read a.py")
+    target.write_text("new content", encoding="utf-8")
+    second = runtime.run("Do a new task")
+
+    assert first.state is RunState.COMPLETED
+    assert second.state is RunState.COMPLETED
+    second_request = client.requests[2]
+    assert second_request.messages == (
+        UserMessage("Read a.py"),
+        AssistantMessage("First final."),
+        UserMessage("Do a new task"),
+    )
+    assert all(
+        "old content" not in repr(message)
+        for message in second_request.messages
+    )
+
+
+def test_context_limit_failure_is_a_controlled_runtime_failure() -> None:
+    client = FakeModelClient([ModelResponse(text="must remain unused")])
+    runtime = AgentRuntime(
+        client,
+        ContextManager(max_context_chars=20),
+        ToolRegistry(),
+        TEST_LIMITS,
+        policy_engine=PolicyEngine(),
+        user_interaction=FakeUserInteraction(),
+    )
+
+    run = runtime.run("A task that cannot fit the configured context bound")
+
+    assert run.state is RunState.FAILED
+    assert run.termination_reason is TerminationReason.RUNTIME_FAILURE
+    assert isinstance(run.last_error, ContextLimitError)
+    assert client.requests == ()
 
 
 def test_keyboard_interrupt_cancels_run_without_consuming_model_turn() -> None:
