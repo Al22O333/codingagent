@@ -7,7 +7,7 @@ name = "coding-agent"
 version = "0.1.0"
 description = "A local coding agent"
 requires-python = ">=3.11"
-dependencies = ["pydantic>=2,<3"]
+dependencies = ["pathspec>=0.12,<1", "pydantic>=2,<3"]
 
 [project.optional-dependencies]
 test = ["pytest>=8.0"]
