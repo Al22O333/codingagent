@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
+from time import monotonic
 from uuid import uuid4
 
 from pydantic import ValidationError
 
 from .context import ContextManager
-from .model_client import ModelClient
+from .model_client import (
+    FatalProviderError,
+    ModelClient,
+    ModelProtocolError,
+    TransientProviderError,
+)
 from .protocol import (
     AssistantMessage,
     ModelRequest,
@@ -20,6 +27,7 @@ from .protocol import (
     ToolOutcome,
     ToolResult,
     ToolResultMessage,
+    SystemMessage,
     UserMessage,
 )
 from .tooling import (
@@ -44,11 +52,32 @@ class TerminationReason(StrEnum):
     """Termination reasons exercised by the minimal runtime slice."""
 
     PROTOCOL_FAILURE = "PROTOCOL_FAILURE"
+    PROVIDER_FAILURE = "PROVIDER_FAILURE"
+    LIMIT_REACHED = "LIMIT_REACHED"
     USER_CANCELLATION = "USER_CANCELLATION"
 
 
-class ModelProtocolError(ValueError):
-    """A model response cannot be treated as a valid final response."""
+@dataclass(frozen=True, slots=True)
+class RuntimeLimits:
+    """Explicit hard limits supplied by configuration."""
+
+    max_model_turns: int
+    max_tool_call_attempts: int
+    max_active_run_duration_seconds: float
+    max_transport_retries: int
+    max_consecutive_protocol_errors: int
+
+    def __post_init__(self) -> None:
+        if self.max_model_turns < 1:
+            raise ValueError("max_model_turns must be at least 1")
+        if self.max_tool_call_attempts < 1:
+            raise ValueError("max_tool_call_attempts must be at least 1")
+        if self.max_active_run_duration_seconds <= 0:
+            raise ValueError("max_active_run_duration_seconds must be positive")
+        if self.max_transport_retries < 0:
+            raise ValueError("max_transport_retries must not be negative")
+        if self.max_consecutive_protocol_errors < 1:
+            raise ValueError("max_consecutive_protocol_errors must be at least 1")
 
 
 @dataclass(slots=True)
@@ -60,10 +89,12 @@ class AgentRun:
     state: RunState = RunState.RUNNING
     model_turns: int = 0
     tool_call_attempts: int = 0
+    active_duration_seconds: float = 0.0
     consecutive_protocol_errors: int = 0
     final_response: str | None = None
     termination_reason: TerminationReason | None = None
-    last_error: ModelProtocolError | None = None
+    limit_reached: str | None = None
+    last_error: Exception | None = None
 
 
 @dataclass(slots=True)
@@ -90,32 +121,75 @@ class AgentRuntime:
         model_client: ModelClient,
         context_manager: ContextManager,
         tool_registry: ToolRegistry,
+        limits: RuntimeLimits,
+        *,
+        clock: Callable[[], float] = monotonic,
     ) -> None:
         self._model_client = model_client
         self._context_manager = context_manager
         self._tool_registry = tool_registry
+        self._limits = limits
+        self._clock = clock
         self.session = Session()
 
     def run(self, task: str) -> AgentRun:
         """Run one user task until a final response or current-slice failure."""
         agent_run = AgentRun(run_id=str(uuid4()), current_task=task)
+        run_started_at = self._clock()
         self.session._add_run(agent_run)
         self._context_manager.record_user_message(UserMessage(text=task))
+        corrective_feedback: SystemMessage | None = None
 
         while agent_run.state is RunState.RUNNING:
+            if self._model_budget_exhausted(agent_run, run_started_at):
+                return agent_run
+
+            messages = self._context_manager.build_messages()
+            if corrective_feedback is not None:
+                messages = messages + (corrective_feedback,)
             request = ModelRequest(
-                messages=self._context_manager.build_messages(),
+                messages=messages,
                 tools=self._tool_registry.specs(),
             )
 
             try:
-                response = self._model_client.complete(request)
+                response = self._complete_model_request(
+                    request,
+                    agent_run,
+                    run_started_at,
+                )
             except KeyboardInterrupt:
                 agent_run.state = RunState.CANCELLED
                 agent_run.termination_reason = TerminationReason.USER_CANCELLATION
+                self._refresh_active_duration(agent_run, run_started_at)
+                return agent_run
+            except ModelProtocolError as error:
+                if self._record_protocol_error(
+                    agent_run,
+                    error,
+                    run_started_at,
+                ):
+                    return agent_run
+                corrective_feedback = self._corrective_feedback()
+                continue
+
+            if response is None:
                 return agent_run
 
-            agent_run.model_turns += 1
+            protocol_error = self._response_protocol_error(response)
+            if protocol_error is not None:
+                if self._record_protocol_error(
+                    agent_run,
+                    protocol_error,
+                    run_started_at,
+                ):
+                    return agent_run
+                corrective_feedback = self._corrective_feedback()
+                continue
+
+            agent_run.consecutive_protocol_errors = 0
+            agent_run.last_error = None
+            corrective_feedback = None
 
             if response.tool_calls:
                 assistant_message = AssistantMessage(
@@ -126,27 +200,20 @@ class AgentRuntime:
                 tool_results = self._execute_tool_batch(
                     response.tool_calls,
                     agent_run,
+                    run_started_at,
                 )
                 self._context_manager.record_tool_result_message(
                     ToolResultMessage(results=tool_results)
                 )
+                if agent_run.state is not RunState.RUNNING:
+                    return agent_run
                 continue
-
-            if not self._is_final_response(response):
-                error = ModelProtocolError(
-                    "model returned no tool calls and no non-blank final text"
-                )
-                agent_run.consecutive_protocol_errors += 1
-                agent_run.last_error = error
-                agent_run.state = RunState.FAILED
-                agent_run.termination_reason = TerminationReason.PROTOCOL_FAILURE
-                return agent_run
 
             assistant_message = AssistantMessage(text=response.text)
             self._context_manager.record_assistant_message(assistant_message)
             agent_run.final_response = response.text
-            agent_run.consecutive_protocol_errors = 0
             agent_run.state = RunState.COMPLETED
+            self._refresh_active_duration(agent_run, run_started_at)
             return agent_run
 
         return agent_run
@@ -155,26 +222,19 @@ class AgentRuntime:
         self,
         tool_calls: tuple[ToolCall, ...],
         agent_run: AgentRun,
+        run_started_at: float,
     ) -> tuple[ToolResult, ...]:
         results: list[ToolResult] = []
         batch_stopped = False
 
         for tool_call in tool_calls:
             if batch_stopped:
-                results.append(
-                    ToolResult(
-                        call_id=tool_call.call_id,
-                        tool_name=tool_call.name,
-                        outcome=ToolOutcome.NOT_EXECUTED,
-                        error=ToolError(
-                            code="BATCH_ABORTED",
-                            message=(
-                                "tool call was not executed because an earlier "
-                                "call ended the batch"
-                            ),
-                        ),
-                    )
-                )
+                results.append(self._not_executed(tool_call))
+                continue
+
+            if self._tool_budget_exhausted(agent_run, run_started_at):
+                results.append(self._not_executed(tool_call))
+                batch_stopped = True
                 continue
 
             result = self._dispatch_local_tool_call(tool_call, agent_run)
@@ -183,6 +243,153 @@ class AgentRuntime:
                 batch_stopped = True
 
         return tuple(results)
+
+    def _complete_model_request(
+        self,
+        request: ModelRequest,
+        agent_run: AgentRun,
+        run_started_at: float,
+    ) -> ModelResponse | None:
+        retries = 0
+        while True:
+            if self._active_duration_exhausted(agent_run, run_started_at):
+                return None
+            try:
+                response = self._model_client.complete(request)
+            except TransientProviderError as error:
+                agent_run.last_error = error
+                if retries >= self._limits.max_transport_retries:
+                    agent_run.state = RunState.FAILED
+                    agent_run.termination_reason = TerminationReason.PROVIDER_FAILURE
+                    self._refresh_active_duration(agent_run, run_started_at)
+                    return None
+                retries += 1
+                continue
+            except FatalProviderError as error:
+                agent_run.last_error = error
+                agent_run.state = RunState.FAILED
+                agent_run.termination_reason = TerminationReason.PROVIDER_FAILURE
+                self._refresh_active_duration(agent_run, run_started_at)
+                return None
+            except ModelProtocolError:
+                agent_run.model_turns += 1
+                raise
+
+            agent_run.model_turns += 1
+            return response
+
+    def _model_budget_exhausted(
+        self,
+        agent_run: AgentRun,
+        run_started_at: float,
+    ) -> bool:
+        if self._active_duration_exhausted(agent_run, run_started_at):
+            return True
+        if agent_run.model_turns >= self._limits.max_model_turns:
+            self._fail_limit(agent_run, "max_model_turns", run_started_at)
+            return True
+        return False
+
+    def _tool_budget_exhausted(
+        self,
+        agent_run: AgentRun,
+        run_started_at: float,
+    ) -> bool:
+        if self._active_duration_exhausted(agent_run, run_started_at):
+            return True
+        if agent_run.tool_call_attempts >= self._limits.max_tool_call_attempts:
+            self._fail_limit(agent_run, "max_tool_call_attempts", run_started_at)
+            return True
+        return False
+
+    def _active_duration_exhausted(
+        self,
+        agent_run: AgentRun,
+        run_started_at: float,
+    ) -> bool:
+        self._refresh_active_duration(agent_run, run_started_at)
+        if (
+            agent_run.active_duration_seconds
+            >= self._limits.max_active_run_duration_seconds
+        ):
+            self._fail_limit(agent_run, "max_active_run_duration", run_started_at)
+            return True
+        return False
+
+    def _fail_limit(
+        self,
+        agent_run: AgentRun,
+        limit_name: str,
+        run_started_at: float,
+    ) -> None:
+        agent_run.state = RunState.FAILED
+        agent_run.termination_reason = TerminationReason.LIMIT_REACHED
+        agent_run.limit_reached = limit_name
+        self._refresh_active_duration(agent_run, run_started_at)
+
+    def _refresh_active_duration(
+        self,
+        agent_run: AgentRun,
+        run_started_at: float,
+    ) -> None:
+        agent_run.active_duration_seconds = max(0.0, self._clock() - run_started_at)
+
+    def _record_protocol_error(
+        self,
+        agent_run: AgentRun,
+        error: ModelProtocolError,
+        run_started_at: float,
+    ) -> bool:
+        agent_run.consecutive_protocol_errors += 1
+        agent_run.last_error = error
+        if (
+            agent_run.consecutive_protocol_errors
+            >= self._limits.max_consecutive_protocol_errors
+        ):
+            agent_run.state = RunState.FAILED
+            agent_run.termination_reason = TerminationReason.PROTOCOL_FAILURE
+            self._refresh_active_duration(agent_run, run_started_at)
+            return True
+        return False
+
+    @staticmethod
+    def _response_protocol_error(response: ModelResponse) -> ModelProtocolError | None:
+        if response.tool_calls:
+            call_ids = [call.call_id for call in response.tool_calls]
+            if len(call_ids) != len(set(call_ids)):
+                return ModelProtocolError(
+                    "model response contains duplicate tool call ids"
+                )
+            return None
+        if response.text is None or not response.text.strip():
+            return ModelProtocolError(
+                "model returned no tool calls and no non-blank final text"
+            )
+        return None
+
+    @staticmethod
+    def _corrective_feedback() -> SystemMessage:
+        return SystemMessage(
+            text=(
+                "Your previous response was invalid. Produce a valid response "
+                "using the provided tool protocol."
+            )
+        )
+
+    @staticmethod
+    def _not_executed(tool_call: ToolCall) -> ToolResult:
+        return ToolResult(
+            call_id=tool_call.call_id,
+            tool_name=tool_call.name,
+            outcome=ToolOutcome.NOT_EXECUTED,
+            error=ToolError(
+                code="BATCH_ABORTED",
+                message=(
+                    "tool call was not executed because an earlier call ended "
+                    "the batch"
+                ),
+            ),
+        )
 
     def _dispatch_local_tool_call(
         self,
@@ -326,15 +533,11 @@ class AgentRuntime:
             error=error,
         )
 
-    @staticmethod
-    def _is_final_response(response: ModelResponse) -> bool:
-        return response.text is not None and bool(response.text.strip())
-
-
 __all__ = [
     "AgentRun",
     "AgentRuntime",
     "ModelProtocolError",
+    "RuntimeLimits",
     "RunState",
     "Session",
     "TerminationReason",

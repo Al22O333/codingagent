@@ -21,17 +21,39 @@ from coding_agent.runtime import (
     AgentRuntime,
     ModelProtocolError,
     RunState,
+    RuntimeLimits,
     TerminationReason,
 )
 from coding_agent.tooling import ToolRegistry
 from coding_agent.workspace import WorkspacePathResolver
 
 
+TEST_LIMITS = RuntimeLimits(
+    max_model_turns=20,
+    max_tool_call_attempts=20,
+    max_active_run_duration_seconds=60,
+    max_transport_retries=1,
+    max_consecutive_protocol_errors=2,
+)
+FAIL_FAST_PROTOCOL_LIMITS = RuntimeLimits(
+    max_model_turns=20,
+    max_tool_call_attempts=20,
+    max_active_run_duration_seconds=60,
+    max_transport_retries=1,
+    max_consecutive_protocol_errors=1,
+)
+
+
 def test_valid_final_response_completes_run() -> None:
     response = ModelResponse(text="Task completed.")
     client = FakeModelClient([response])
     context = ContextManager()
-    runtime = AgentRuntime(client, context, ToolRegistry())
+    runtime = AgentRuntime(
+        client,
+        context,
+        ToolRegistry(),
+        TEST_LIMITS,
+    )
 
     run = runtime.run("Complete the task")
 
@@ -54,7 +76,12 @@ def test_empty_no_tool_response_follows_protocol_error_path(
 ) -> None:
     client = FakeModelClient([ModelResponse(text=text)])
     context = ContextManager()
-    runtime = AgentRuntime(client, context, ToolRegistry())
+    runtime = AgentRuntime(
+        client,
+        context,
+        ToolRegistry(),
+        FAIL_FAST_PROTOCOL_LIMITS,
+    )
 
     run = runtime.run("Complete the task")
 
@@ -73,7 +100,7 @@ def test_session_keeps_sequential_runs_and_conversation_continuity() -> None:
         [ModelResponse(text="First final."), ModelResponse(text="Second final.")]
     )
     context = ContextManager()
-    runtime = AgentRuntime(client, context, ToolRegistry())
+    runtime = AgentRuntime(client, context, ToolRegistry(), TEST_LIMITS)
 
     first = runtime.run("First task")
     second = runtime.run("Second task")
@@ -95,7 +122,7 @@ def test_keyboard_interrupt_cancels_run_without_consuming_model_turn() -> None:
 
     client = InterruptingModelClient()
     context = ContextManager()
-    runtime = AgentRuntime(client, context, ToolRegistry())
+    runtime = AgentRuntime(client, context, ToolRegistry(), TEST_LIMITS)
 
     run = runtime.run("Complete the task")
 
@@ -137,7 +164,7 @@ def test_multiple_successful_tool_calls_are_processed_before_next_turn(
             max_bytes=1024,
         )
     )
-    runtime = AgentRuntime(client, context, registry)
+    runtime = AgentRuntime(client, context, registry, TEST_LIMITS)
 
     run = runtime.run("Inspect both files")
 

@@ -15,9 +15,18 @@ from coding_agent.protocol import (
     UserMessage,
 )
 from coding_agent.read_file import ReadFileArguments, ReadFileContent, ReadFileTool
-from coding_agent.runtime import AgentRuntime, RunState
+from coding_agent.runtime import AgentRuntime, RunState, RuntimeLimits
 from coding_agent.tooling import ToolExecutionResult, ToolRegistry
 from coding_agent.workspace import ResolvedPath, WorkspacePathResolver
+
+
+TEST_LIMITS = RuntimeLimits(
+    max_model_turns=20,
+    max_tool_call_attempts=20,
+    max_active_run_duration_seconds=60,
+    max_transport_retries=1,
+    max_consecutive_protocol_errors=2,
+)
 
 
 class ObservingReadFileTool(ReadFileTool):
@@ -60,7 +69,7 @@ def _runtime(
     registry = ToolRegistry()
     registry.register(tool)
     client = FakeModelClient(responses)
-    return AgentRuntime(client, context, registry), client, context
+    return AgentRuntime(client, context, registry, TEST_LIMITS), client, context
 
 
 def test_read_file_tool_loop_reaches_final_response(tmp_path: Path) -> None:

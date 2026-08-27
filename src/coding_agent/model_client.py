@@ -18,6 +18,18 @@ class ModelClient(Protocol):
         ...
 
 
+class TransientProviderError(RuntimeError):
+    """A provider failure eligible for bounded Transport Retry."""
+
+
+class FatalProviderError(RuntimeError):
+    """A non-retryable provider or configuration failure."""
+
+
+class ModelProtocolError(ValueError):
+    """An obtained assistant response cannot be reliably normalized."""
+
+
 class FakeModelExhaustedError(AssertionError):
     """Raised when a test asks for more responses than it configured."""
 
@@ -60,5 +72,8 @@ __all__ = [
     "FakeModelClient",
     "FakeModelEvent",
     "FakeModelExhaustedError",
+    "FatalProviderError",
+    "ModelProtocolError",
     "ModelClient",
+    "TransientProviderError",
 ]
