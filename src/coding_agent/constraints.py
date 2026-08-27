@@ -76,12 +76,17 @@ _WRITE_SCOPE_PATTERNS = (
 )
 _FORBID_MUTATION = (
     "不要修改文件",
+    "不要修改任何文件",
+    "不要改文件",
+    "不要改任何文件",
     "请勿修改文件",
     "不可以修改文件",
     "不允许修改文件",
     "只读，不要修改",
     "do not modify files",
+    "do not modify any files",
     "don't modify files",
+    "don't modify any files",
     "no file changes",
 )
 _ALLOW_MUTATION = (
@@ -92,11 +97,16 @@ _ALLOW_MUTATION = (
 )
 _FORBID_COMMAND = (
     "不要运行命令",
+    "不要运行任何命令",
+    "不要执行命令",
+    "不要执行任何命令",
     "请勿运行命令",
     "不可以运行命令",
     "不允许运行命令",
     "do not run commands",
+    "do not run any commands",
     "don't run commands",
+    "don't run any commands",
     "no command execution",
 )
 _ALLOW_COMMAND = (
@@ -111,6 +121,17 @@ _CLEAR_WRITE_SCOPE = (
     "remove the write scope restriction",
     "write scope is unrestricted",
 )
+_CONDITIONAL_LANGUAGE = re.compile(
+    r"如果|若(?:果)?|除非|\bif\b|\bunless\b",
+    re.IGNORECASE,
+)
+_ATTRIBUTION_BEFORE_CONSTRAINT = re.compile(
+    r"(?:说|提到|写着|表示|声称)\s*[:：]?\s*$|"
+    r"\b(?:says?|said|mentions?|mentioned|states?|stated)\s*[:：]?\s*$",
+    re.IGNORECASE,
+)
+_SENTENCE_BOUNDARY = re.compile(r"[。；;.!?\r\n]")
+_QUOTE_PAIRS = {"“": "”", '"': '"', "'": "'"}
 
 
 def normalize_explicit_constraint_update(
@@ -233,7 +254,7 @@ def _closed_toggle(
     set_phrases: tuple[str, ...],
     clear_phrases: tuple[str, ...],
 ) -> bool | _Ambiguous | None:
-    set_constraint = any(phrase in text for phrase in set_phrases)
+    set_constraint = _contains_explicit_set_phrase(text, set_phrases)
     clear_constraint = any(
         re.search(rf"(?<!不){re.escape(phrase)}", text) is not None
         for phrase in clear_phrases
@@ -245,6 +266,46 @@ def _closed_toggle(
     if clear_constraint:
         return False
     return None
+
+
+def _contains_explicit_set_phrase(
+    text: str,
+    phrases: tuple[str, ...],
+) -> bool:
+    """Match only closed phrases that are unconditional and not quoted reports."""
+    for phrase in phrases:
+        search_from = 0
+        while (position := text.find(phrase, search_from)) >= 0:
+            phrase_end = position + len(phrase)
+            sentence_start = _last_sentence_boundary(text, position)
+            sentence_end = _next_sentence_boundary(text, phrase_end)
+            sentence = text[sentence_start:sentence_end]
+            prefix = text[sentence_start:position]
+            if (
+                _CONDITIONAL_LANGUAGE.search(sentence) is None
+                and _ATTRIBUTION_BEFORE_CONSTRAINT.search(prefix) is None
+                and not _is_directly_quoted(text, position, phrase_end)
+            ):
+                return True
+            search_from = position + 1
+    return False
+
+
+def _last_sentence_boundary(text: str, position: int) -> int:
+    boundaries = list(_SENTENCE_BOUNDARY.finditer(text, 0, position))
+    return boundaries[-1].end() if boundaries else 0
+
+
+def _next_sentence_boundary(text: str, position: int) -> int:
+    boundary = _SENTENCE_BOUNDARY.search(text, position)
+    return boundary.start() if boundary is not None else len(text)
+
+
+def _is_directly_quoted(text: str, start: int, end: int) -> bool:
+    if start == 0 or end >= len(text):
+        return False
+    opening = text[start - 1]
+    return opening in _QUOTE_PAIRS and text[end] == _QUOTE_PAIRS[opening]
 
 
 def _resolve_write_scope(
