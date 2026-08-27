@@ -11,15 +11,16 @@ from pydantic import ValidationError
 
 from coding_agent.edit_file import EditFileArguments, EditFileContent, EditFileTool
 from coding_agent.protocol import ToolOutcome
-from coding_agent.workspace import ResolvedPath, WorkspacePathResolver
+from coding_agent.tooling import PreparedToolCall
+from coding_agent.workspace import WorkspacePathResolver
 
 
 def _prepare(
     tool: EditFileTool,
     arguments: EditFileArguments,
-) -> ResolvedPath:
-    prepared = tool.prepare(arguments)
-    assert isinstance(prepared, ResolvedPath)
+) -> PreparedToolCall:
+    prepared = tool.prepare("edit", arguments)
+    assert isinstance(prepared, PreparedToolCall)
     return prepared
 
 
@@ -35,7 +36,7 @@ def test_exact_single_replacement_returns_summary(tmp_path: Path) -> None:
         new_text="value = 2",
     )
 
-    result = tool.execute(arguments, _prepare(tool, arguments))
+    result = tool.execute(_prepare(tool, arguments))
 
     assert result.outcome is ToolOutcome.SUCCESS
     assert result.error is None
@@ -61,7 +62,7 @@ def test_zero_match_detects_stale_observation_without_mutation(tmp_path: Path) -
     prepared = _prepare(tool, arguments)
     target.write_text("value = 3\n", encoding="utf-8")
 
-    result = tool.execute(arguments, prepared)
+    result = tool.execute(prepared)
 
     assert result.outcome is ToolOutcome.OPERATION_FAILURE
     assert result.error is not None
@@ -84,7 +85,7 @@ def test_ambiguous_match_count_fails_closed(tmp_path: Path) -> None:
         expected_count=1,
     )
 
-    result = tool.execute(arguments, _prepare(tool, arguments))
+    result = tool.execute(_prepare(tool, arguments))
 
     assert result.outcome is ToolOutcome.OPERATION_FAILURE
     assert result.error is not None
@@ -112,7 +113,7 @@ def test_expected_count_greater_than_one_replaces_all_exact_matches(
         expected_count=3,
     )
 
-    result = tool.execute(arguments, _prepare(tool, arguments))
+    result = tool.execute(_prepare(tool, arguments))
 
     assert result.outcome is ToolOutcome.SUCCESS
     assert isinstance(result.content, EditFileContent)
@@ -132,7 +133,7 @@ def test_crlf_and_mixed_line_endings_are_preserved(tmp_path: Path) -> None:
         new_text="new value",
     )
 
-    result = tool.execute(arguments, _prepare(tool, arguments))
+    result = tool.execute(_prepare(tool, arguments))
 
     assert result.outcome is ToolOutcome.SUCCESS
     assert target.read_bytes() == b"first\r\nnew value\r\nthird\nfourth\r\n"
@@ -158,7 +159,7 @@ def test_write_failure_preserves_original_and_removes_temporary_file(
         raise PermissionError("simulated replacement failure")
 
     monkeypatch.setattr("coding_agent.edit_file.os.replace", fail_replace)
-    result = tool.execute(arguments, _prepare(tool, arguments))
+    result = tool.execute(_prepare(tool, arguments))
 
     assert result.outcome is ToolOutcome.OPERATION_FAILURE
     assert result.error is not None
@@ -181,7 +182,7 @@ def test_original_permission_mode_is_preserved(tmp_path: Path) -> None:
         new_text="new",
     )
 
-    result = tool.execute(arguments, _prepare(tool, arguments))
+    result = tool.execute(_prepare(tool, arguments))
 
     assert result.outcome is ToolOutcome.SUCCESS
     assert stat.S_IMODE(target.stat().st_mode) == 0o754

@@ -15,13 +15,14 @@ from coding_agent.discovery import (
     SearchFilesTool,
 )
 from coding_agent.protocol import ToolError, ToolOutcome
-from coding_agent.workspace import ResolvedPath, WorkspacePathResolver
+from coding_agent.tooling import PreparedToolCall
+from coding_agent.workspace import WorkspacePathResolver
 
 
 def _execute(tool, arguments):
-    prepared = tool.prepare(arguments)
-    assert isinstance(prepared, ResolvedPath)
-    return tool.execute(arguments, prepared)
+    prepared = tool.prepare("discovery", arguments)
+    assert isinstance(prepared, PreparedToolCall)
+    return tool.execute(prepared)
 
 
 def test_list_directory_is_one_level_filtered_and_deterministic(
@@ -136,8 +137,9 @@ def test_discovery_prepare_reports_missing_and_non_directory_paths(
     list_tool = ListDirectoryTool(resolver, max_entries=10)
     search_tool = SearchFilesTool(resolver, max_results=10)
 
-    missing = list_tool.prepare(ListDirectoryArguments(path="missing"))
+    missing = list_tool.prepare("missing", ListDirectoryArguments(path="missing"))
     file_target = search_tool.prepare(
+        "file-target",
         SearchFilesArguments(pattern="*", path="file.txt")
     )
 

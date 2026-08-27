@@ -29,9 +29,9 @@ class TrackingReadFileTool(ReadFileTool):
         super().__init__(resolver, max_lines=20, max_bytes=4096)
         object.__setattr__(self, "prepared_paths", [])
 
-    def prepare(self, arguments):
+    def prepare(self, call_id, arguments):
         self.prepared_paths.append(arguments.path)
-        return super().prepare(arguments)
+        return super().prepare(call_id, arguments)
 
 
 def test_batch_fail_stop_preserves_correspondence_and_attempt_count(

@@ -12,7 +12,8 @@ import pytest
 
 from coding_agent.protocol import ToolError, ToolOutcome
 from coding_agent.shell import ShellArguments, ShellBackend, ShellContent, ShellTool
-from coding_agent.workspace import ResolvedPath, WorkspacePathResolver
+from coding_agent.tooling import PreparedToolCall
+from coding_agent.workspace import WorkspacePathResolver
 
 
 def _backend() -> ShellBackend:
@@ -49,9 +50,9 @@ def _tool(
 
 
 def _execute(tool: ShellTool, arguments: ShellArguments):
-    prepared = tool.prepare(arguments)
-    assert isinstance(prepared, ResolvedPath)
-    return tool.execute(arguments, prepared)
+    prepared = tool.prepare("shell", arguments)
+    assert isinstance(prepared, PreparedToolCall)
+    return tool.execute(prepared)
 
 
 def test_exit_zero_captures_stdout_and_resolved_cwd(tmp_path: Path) -> None:
@@ -145,8 +146,14 @@ def test_missing_and_non_directory_cwd_fail_during_preparation(
     (workspace / "file.txt").write_text("content", encoding="utf-8")
     tool = _tool(workspace)
 
-    missing = tool.prepare(ShellArguments(command="unused", cwd="missing"))
-    file_target = tool.prepare(ShellArguments(command="unused", cwd="file.txt"))
+    missing = tool.prepare(
+        "missing",
+        ShellArguments(command="unused", cwd="missing"),
+    )
+    file_target = tool.prepare(
+        "file-target",
+        ShellArguments(command="unused", cwd="file.txt"),
+    )
 
     assert isinstance(missing, ToolError)
     assert missing.code == "CWD_NOT_FOUND"

@@ -8,8 +8,13 @@ from dataclasses import dataclass
 from pydantic import Field
 
 from .protocol import ToolCapability, ToolError, ToolKind, ToolOutcome
-from .tooling import Tool, ToolArguments, ToolExecutionResult
-from .workspace import PathResolutionMode, ResolvedPath, WorkspacePathResolver
+from .tooling import PreparedToolCall, Tool, ToolArguments, ToolExecutionResult
+from .workspace import (
+    FileOperationFacts,
+    PathResolutionMode,
+    ResolvedPath,
+    WorkspacePathResolver,
+)
 
 
 class CreateFileArguments(ToolArguments):
@@ -42,7 +47,11 @@ class CreateFileTool(Tool[CreateFileArguments]):
         )
         object.__setattr__(self, "_resolver", resolver)
 
-    def prepare(self, arguments: CreateFileArguments) -> ResolvedPath | ToolError:
+    def prepare(
+        self,
+        call_id: str,
+        arguments: CreateFileArguments,
+    ) -> PreparedToolCall | ToolError:
         """Resolve a candidate new target and require its direct parent."""
         try:
             resolved = self._resolver.resolve_workspace_path(
@@ -69,7 +78,11 @@ class CreateFileTool(Tool[CreateFileArguments]):
             )
 
         if not resolved.is_within_workspace:
-            return resolved
+            return self.prepared_call(
+                call_id,
+                arguments,
+                FileOperationFacts(target=resolved, affected_paths=(resolved,)),
+            )
         if resolved.exists:
             return self._error(
                 "FILE_ALREADY_EXISTS",
@@ -97,14 +110,36 @@ class CreateFileTool(Tool[CreateFileArguments]):
                 "create_file parent path is not a directory",
                 arguments.path,
             )
-        return resolved
+        return self.prepared_call(
+            call_id,
+            arguments,
+            FileOperationFacts(target=resolved, affected_paths=(resolved,)),
+        )
 
     def execute(
         self,
-        arguments: CreateFileArguments,
-        resolved: ResolvedPath,
+        prepared_call: PreparedToolCall,
     ) -> ToolExecutionResult:
         """Create the prepared target with OS exclusive-create semantics."""
+        if (
+            prepared_call.tool_identity.name != self.name
+            or not isinstance(prepared_call.validated_arguments, CreateFileArguments)
+            or not isinstance(prepared_call.operation_facts, FileOperationFacts)
+        ):
+            return self._failure(
+                "INTERNAL_TOOL_ERROR",
+                "prepared call does not match create_file",
+                "<unknown>",
+            )
+        arguments = prepared_call.validated_arguments
+        facts = prepared_call.operation_facts
+        resolved = facts.target
+        if facts.affected_paths != (resolved,):
+            return self._failure(
+                "INTERNAL_TOOL_ERROR",
+                "prepared create_file affected paths are invalid",
+                arguments.path,
+            )
         if resolved.raw_path != arguments.path:
             return self._failure(
                 "INTERNAL_TOOL_ERROR",

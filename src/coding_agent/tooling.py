@@ -27,6 +27,22 @@ ArgumentsT = TypeVar("ArgumentsT", bound=ToolArguments)
 
 
 @dataclass(frozen=True, slots=True)
+class PreparedToolCall:
+    """One validated LOCAL action plus immutable dynamic operation facts."""
+
+    call_id: str
+    tool_identity: ToolSpec
+    validated_arguments: ToolArguments
+    operation_facts: object
+
+    def __post_init__(self) -> None:
+        if not self.call_id.strip():
+            raise ValueError("call_id must not be empty")
+        if self.tool_identity.kind is not ToolKind.LOCAL:
+            raise ValueError("PreparedToolCall requires a LOCAL Tool identity")
+
+
+@dataclass(frozen=True, slots=True)
 class Tool(Generic[ArgumentsT]):
     """A tool's typed argument contract and provider-neutral metadata."""
 
@@ -57,6 +73,20 @@ class Tool(Generic[ArgumentsT]):
     def validate(self, raw_arguments: object) -> ArgumentsT:
         """Validate untrusted model arguments into a typed immutable value."""
         return self.argument_model.model_validate(_validation_input(raw_arguments))
+
+    def prepared_call(
+        self,
+        call_id: str,
+        arguments: ArgumentsT,
+        operation_facts: object,
+    ) -> PreparedToolCall:
+        """Bind validated arguments and typed facts to this LOCAL Tool identity."""
+        return PreparedToolCall(
+            call_id=call_id,
+            tool_identity=self.spec,
+            validated_arguments=arguments,
+            operation_facts=operation_facts,
+        )
 
 
 def _validation_input(value: object) -> object:
@@ -105,16 +135,19 @@ class LocalTool(Protocol):
         """Validate untrusted arguments."""
         ...
 
-    def prepare(self, arguments: Any) -> object | ToolError:
-        """Return dynamic operation facts or an expected preparation error."""
+    def prepare(
+        self,
+        call_id: str,
+        arguments: Any,
+    ) -> PreparedToolCall | ToolError:
+        """Return an exact prepared local action or expected operation error."""
         ...
 
     def execute(
         self,
-        arguments: Any,
-        prepared: object,
+        prepared_call: PreparedToolCall,
     ) -> ToolExecutionResult:
-        """Execute an already prepared and permitted local action."""
+        """Execute one already prepared and permitted local action."""
         ...
 
 
@@ -193,6 +226,7 @@ __all__ = [
     "DuplicateToolNameError",
     "InvalidToolSpecError",
     "LocalTool",
+    "PreparedToolCall",
     "Tool",
     "ToolArguments",
     "ToolExecutionResult",

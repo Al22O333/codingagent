@@ -30,13 +30,15 @@ from .protocol import (
     SystemMessage,
     UserMessage,
 )
+from .shell import ShellOperationFacts
 from .tooling import (
     LocalTool,
+    PreparedToolCall,
     ToolExecutionResult,
     ToolRegistry,
     UnknownToolError,
 )
-from .workspace import ResolvedPath
+from .workspace import FileOperationFacts, ResolvedPath
 
 
 class RunState(StrEnum):
@@ -443,7 +445,7 @@ class AgentRuntime:
             )
 
         try:
-            prepared = tool.prepare(arguments)
+            prepared = tool.prepare(tool_call.call_id, arguments)
         except Exception:
             return self._operation_failure(
                 tool_call.call_id,
@@ -461,12 +463,27 @@ class AgentRuntime:
                 prepared,
             )
 
+        if (
+            not isinstance(prepared, PreparedToolCall)
+            or prepared.call_id != tool_call.call_id
+            or prepared.tool_identity != tool.spec
+            or prepared.validated_arguments is not arguments
+        ):
+            return self._operation_failure(
+                tool_call.call_id,
+                tool_call.name,
+                ToolError(
+                    code="INTERNAL_TOOL_ERROR",
+                    message="local tool returned an invalid prepared action",
+                ),
+            )
+
         policy_rejection = self._minimal_file_policy(tool_call, prepared)
         if policy_rejection is not None:
             return policy_rejection
 
         try:
-            execution = tool.execute(arguments, prepared)
+            execution = tool.execute(prepared)
         except Exception:
             return self._operation_failure(
                 tool_call.call_id,
@@ -498,17 +515,24 @@ class AgentRuntime:
     @staticmethod
     def _minimal_file_policy(
         tool_call: ToolCall,
-        prepared: object,
+        prepared: PreparedToolCall,
     ) -> ToolResult | None:
-        if not isinstance(prepared, ResolvedPath):
+        operation_facts = prepared.operation_facts
+        if isinstance(operation_facts, FileOperationFacts):
+            resolved = operation_facts.target
+        elif isinstance(operation_facts, ShellOperationFacts):
+            resolved = operation_facts.cwd
+        else:
             return None
-        if not prepared.is_within_workspace:
+        if not isinstance(resolved, ResolvedPath):
+            return None
+        if not resolved.is_within_workspace:
             code = "WORKSPACE_BOUNDARY"
             message = "File Tool access outside the workspace is prohibited"
-        elif prepared.is_sensitive:
+        elif resolved.is_sensitive:
             code = "SENSITIVE_PATH_CONFIRMATION_REQUIRED"
             message = "Sensitive Path access requires explicit user confirmation"
-        elif prepared.is_protected:
+        elif resolved.is_protected:
             code = "PROTECTED_PATH_CONFIRMATION_REQUIRED"
             message = "Protected Path access requires explicit user confirmation"
         else:

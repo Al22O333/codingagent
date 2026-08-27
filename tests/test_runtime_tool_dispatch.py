@@ -14,10 +14,10 @@ from coding_agent.protocol import (
     ToolResultMessage,
     UserMessage,
 )
-from coding_agent.read_file import ReadFileArguments, ReadFileContent, ReadFileTool
+from coding_agent.read_file import ReadFileContent, ReadFileTool
 from coding_agent.runtime import AgentRuntime, RunState, RuntimeLimits
-from coding_agent.tooling import ToolExecutionResult, ToolRegistry
-from coding_agent.workspace import ResolvedPath, WorkspacePathResolver
+from coding_agent.tooling import PreparedToolCall, ToolExecutionResult, ToolRegistry
+from coding_agent.workspace import WorkspacePathResolver
 
 
 TEST_LIMITS = RuntimeLimits(
@@ -44,13 +44,12 @@ class ObservingReadFileTool(ReadFileTool):
 
     def execute(
         self,
-        arguments: ReadFileArguments,
-        resolved: ResolvedPath,
+        prepared_call: PreparedToolCall,
     ) -> ToolExecutionResult:
         latest_message = self._context.build_messages()[-1]
         assert isinstance(latest_message, AssistantMessage)
         assert latest_message.tool_calls[0].call_id == "call-read"
-        return super().execute(arguments, resolved)
+        return super().execute(prepared_call)
 
 
 def _runtime(

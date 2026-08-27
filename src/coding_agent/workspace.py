@@ -36,6 +36,17 @@ class ResolvedPath:
             )
 
 
+@dataclass(frozen=True, slots=True)
+class FileOperationFacts:
+    """Dynamic path facts used by File Tool policy and exact execution."""
+
+    target: ResolvedPath
+    affected_paths: tuple[ResolvedPath, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "affected_paths", tuple(self.affected_paths))
+
+
 class WorkspacePathResolver:
     """Bind one canonical workspace root and resolve all File Tool paths."""
 
@@ -177,4 +188,9 @@ class WorkspacePathResolver:
         )
 
 
-__all__ = ["PathResolutionMode", "ResolvedPath", "WorkspacePathResolver"]
+__all__ = [
+    "FileOperationFacts",
+    "PathResolutionMode",
+    "ResolvedPath",
+    "WorkspacePathResolver",
+]

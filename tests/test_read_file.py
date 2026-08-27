@@ -9,7 +9,8 @@ from pydantic import ValidationError
 
 from coding_agent.protocol import ToolCapability, ToolError, ToolKind, ToolOutcome
 from coding_agent.read_file import ReadFileArguments, ReadFileContent, ReadFileTool
-from coding_agent.workspace import ResolvedPath, WorkspacePathResolver
+from coding_agent.tooling import PreparedToolCall
+from coding_agent.workspace import FileOperationFacts, WorkspacePathResolver
 
 
 def _tool(workspace: Path, *, max_lines: int = 3, max_bytes: int = 1024) -> ReadFileTool:
@@ -23,10 +24,11 @@ def _tool(workspace: Path, *, max_lines: int = 3, max_bytes: int = 1024) -> Read
 def _prepare_inside(
     tool: ReadFileTool,
     arguments: ReadFileArguments,
-) -> ResolvedPath:
-    prepared = tool.prepare(arguments)
-    assert isinstance(prepared, ResolvedPath)
-    assert prepared.is_within_workspace is True
+) -> PreparedToolCall:
+    prepared = tool.prepare("test-call", arguments)
+    assert isinstance(prepared, PreparedToolCall)
+    assert isinstance(prepared.operation_facts, FileOperationFacts)
+    assert prepared.operation_facts.target.is_within_workspace is True
     return prepared
 
 
@@ -58,7 +60,7 @@ def test_normal_text_read_has_model_facing_line_numbers(tmp_path: Path) -> None:
     tool = _tool(workspace, max_lines=10)
     arguments = ReadFileArguments(path="main.py", start_line=2, end_line=3)
 
-    result = tool.execute(arguments, _prepare_inside(tool, arguments))
+    result = tool.execute(_prepare_inside(tool, arguments))
 
     assert result.outcome is ToolOutcome.SUCCESS
     assert result.error is None
@@ -83,7 +85,7 @@ def test_large_file_read_is_bounded_and_can_continue(tmp_path: Path) -> None:
     tool = _tool(workspace, max_lines=3)
 
     first_arguments = ReadFileArguments(path="large.txt")
-    first = tool.execute(first_arguments, _prepare_inside(tool, first_arguments))
+    first = tool.execute(_prepare_inside(tool, first_arguments))
     assert first.content == ReadFileContent(
         path="large.txt",
         start_line=1,
@@ -96,7 +98,6 @@ def test_large_file_read_is_bounded_and_can_continue(tmp_path: Path) -> None:
 
     continuation_arguments = ReadFileArguments(path="large.txt", start_line=4)
     continuation = tool.execute(
-        continuation_arguments,
         _prepare_inside(tool, continuation_arguments),
     )
     assert continuation.content == ReadFileContent(
@@ -110,7 +111,7 @@ def test_large_file_read_is_bounded_and_can_continue(tmp_path: Path) -> None:
     )
 
     final_arguments = ReadFileArguments(path="large.txt", start_line=7)
-    final = tool.execute(final_arguments, _prepare_inside(tool, final_arguments))
+    final = tool.execute(_prepare_inside(tool, final_arguments))
     assert isinstance(final.content, ReadFileContent)
     assert final.content.end_line == 7
     assert final.content.truncated is False
@@ -124,7 +125,7 @@ def test_returned_content_is_bounded_by_utf8_bytes(tmp_path: Path) -> None:
     tool = _tool(workspace, max_lines=5, max_bytes=10)
     arguments = ReadFileArguments(path="unicode.txt")
 
-    result = tool.execute(arguments, _prepare_inside(tool, arguments))
+    result = tool.execute(_prepare_inside(tool, arguments))
 
     assert isinstance(result.content, ReadFileContent)
     assert len(result.content.content.encode("utf-8")) <= 10
@@ -137,7 +138,7 @@ def test_missing_file_returns_structured_preparation_error(tmp_path: Path) -> No
     workspace.mkdir()
     tool = _tool(workspace)
 
-    prepared = tool.prepare(ReadFileArguments(path="missing.txt"))
+    prepared = tool.prepare("missing", ReadFileArguments(path="missing.txt"))
 
     assert isinstance(prepared, ToolError)
     assert prepared.code == "FILE_NOT_FOUND"
@@ -149,7 +150,7 @@ def test_directory_returns_not_a_file(tmp_path: Path) -> None:
     directory.mkdir(parents=True)
     tool = _tool(workspace)
 
-    prepared = tool.prepare(ReadFileArguments(path="directory"))
+    prepared = tool.prepare("directory", ReadFileArguments(path="directory"))
 
     assert isinstance(prepared, ToolError)
     assert prepared.code == "NOT_A_FILE"
@@ -162,7 +163,7 @@ def test_binary_file_returns_structured_operation_failure(tmp_path: Path) -> Non
     tool = _tool(workspace)
     arguments = ReadFileArguments(path="binary.dat")
 
-    result = tool.execute(arguments, _prepare_inside(tool, arguments))
+    result = tool.execute(_prepare_inside(tool, arguments))
 
     assert result.outcome is ToolOutcome.OPERATION_FAILURE
     assert result.error is not None
@@ -176,7 +177,7 @@ def test_invalid_utf8_returns_structured_operation_failure(tmp_path: Path) -> No
     tool = _tool(workspace)
     arguments = ReadFileArguments(path="invalid.txt")
 
-    result = tool.execute(arguments, _prepare_inside(tool, arguments))
+    result = tool.execute(_prepare_inside(tool, arguments))
 
     assert result.outcome is ToolOutcome.OPERATION_FAILURE
     assert result.error is not None
@@ -190,11 +191,12 @@ def test_outside_workspace_is_a_resolved_policy_fact(tmp_path: Path) -> None:
     outside.write_text("outside", encoding="utf-8")
     tool = _tool(workspace)
 
-    prepared = tool.prepare(ReadFileArguments(path=str(outside)))
+    prepared = tool.prepare("outside", ReadFileArguments(path=str(outside)))
 
-    assert isinstance(prepared, ResolvedPath)
-    assert prepared.is_within_workspace is False
-    assert prepared.workspace_relative_path is None
+    assert isinstance(prepared, PreparedToolCall)
+    assert isinstance(prepared.operation_facts, FileOperationFacts)
+    assert prepared.operation_facts.target.is_within_workspace is False
+    assert prepared.operation_facts.target.workspace_relative_path is None
 
 
 def test_constructor_requires_positive_output_limits(tmp_path: Path) -> None:

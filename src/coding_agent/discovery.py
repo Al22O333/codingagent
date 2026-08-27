@@ -10,8 +10,13 @@ from pathspec import PathSpec
 from pydantic import Field
 
 from .protocol import ToolCapability, ToolError, ToolKind, ToolOutcome
-from .tooling import Tool, ToolArguments, ToolExecutionResult
-from .workspace import PathResolutionMode, ResolvedPath, WorkspacePathResolver
+from .tooling import PreparedToolCall, Tool, ToolArguments, ToolExecutionResult
+from .workspace import (
+    FileOperationFacts,
+    PathResolutionMode,
+    ResolvedPath,
+    WorkspacePathResolver,
+)
 
 
 DEFAULT_NOISE_DIRECTORIES = frozenset(
@@ -117,14 +122,33 @@ class ListDirectoryTool(Tool[ListDirectoryArguments]):
         object.__setattr__(self, "_resolver", resolver)
         object.__setattr__(self, "_max_entries", max_entries)
 
-    def prepare(self, arguments: ListDirectoryArguments) -> ResolvedPath | ToolError:
-        return _prepare_directory(self._resolver, arguments.path)
+    def prepare(
+        self,
+        call_id: str,
+        arguments: ListDirectoryArguments,
+    ) -> PreparedToolCall | ToolError:
+        resolved = _prepare_directory(self._resolver, arguments.path)
+        if isinstance(resolved, ToolError):
+            return resolved
+        return self.prepared_call(
+            call_id,
+            arguments,
+            FileOperationFacts(target=resolved),
+        )
 
     def execute(
         self,
-        arguments: ListDirectoryArguments,
-        resolved: ResolvedPath,
+        prepared_call: PreparedToolCall,
     ) -> ToolExecutionResult:
+        prepared = _prepared_file_action(
+            prepared_call,
+            self.name,
+            ListDirectoryArguments,
+        )
+        if isinstance(prepared, ToolError):
+            return _failure(prepared)
+        arguments, facts = prepared
+        resolved = facts.target
         mismatch = _validate_prepared_directory(arguments.path, resolved)
         if mismatch is not None:
             return _failure(mismatch)
@@ -204,14 +228,33 @@ class SearchFilesTool(Tool[SearchFilesArguments]):
         object.__setattr__(self, "_resolver", resolver)
         object.__setattr__(self, "_max_results", max_results)
 
-    def prepare(self, arguments: SearchFilesArguments) -> ResolvedPath | ToolError:
-        return _prepare_directory(self._resolver, arguments.path)
+    def prepare(
+        self,
+        call_id: str,
+        arguments: SearchFilesArguments,
+    ) -> PreparedToolCall | ToolError:
+        resolved = _prepare_directory(self._resolver, arguments.path)
+        if isinstance(resolved, ToolError):
+            return resolved
+        return self.prepared_call(
+            call_id,
+            arguments,
+            FileOperationFacts(target=resolved),
+        )
 
     def execute(
         self,
-        arguments: SearchFilesArguments,
-        resolved: ResolvedPath,
+        prepared_call: PreparedToolCall,
     ) -> ToolExecutionResult:
+        prepared = _prepared_file_action(
+            prepared_call,
+            self.name,
+            SearchFilesArguments,
+        )
+        if isinstance(prepared, ToolError):
+            return _failure(prepared)
+        arguments, facts = prepared
+        resolved = facts.target
         mismatch = _validate_prepared_directory(arguments.path, resolved)
         if mismatch is not None:
             return _failure(mismatch)
@@ -349,6 +392,23 @@ def _glob_matches(relative_path: str, pattern: str) -> bool:
     if pattern.startswith("**/"):
         return path.match(pattern[3:])
     return False
+
+
+def _prepared_file_action(
+    prepared_call: PreparedToolCall,
+    tool_name: str,
+    argument_type,
+):
+    if (
+        prepared_call.tool_identity.name != tool_name
+        or not isinstance(prepared_call.validated_arguments, argument_type)
+        or not isinstance(prepared_call.operation_facts, FileOperationFacts)
+    ):
+        return ToolError(
+            code="INTERNAL_TOOL_ERROR",
+            message=f"prepared call does not match {tool_name}",
+        )
+    return prepared_call.validated_arguments, prepared_call.operation_facts
 
 
 def _failure(error: ToolError) -> ToolExecutionResult:

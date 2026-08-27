@@ -13,12 +13,13 @@ from .discovery import (
     DiscoveryIgnoreRules,
     _glob_matches,
     _prepare_directory,
+    _prepared_file_action,
     _resolve_visible_entry,
     _validate_prepared_directory,
 )
 from .protocol import ToolCapability, ToolError, ToolKind, ToolOutcome
-from .tooling import Tool, ToolArguments, ToolExecutionResult
-from .workspace import ResolvedPath, WorkspacePathResolver
+from .tooling import PreparedToolCall, Tool, ToolArguments, ToolExecutionResult
+from .workspace import FileOperationFacts, ResolvedPath, WorkspacePathResolver
 
 
 class SearchTextArguments(ToolArguments):
@@ -78,14 +79,33 @@ class SearchTextTool(Tool[SearchTextArguments]):
         object.__setattr__(self, "_max_matches", max_matches)
         object.__setattr__(self, "_max_line_bytes", max_line_bytes)
 
-    def prepare(self, arguments: SearchTextArguments) -> ResolvedPath | ToolError:
-        return _prepare_directory(self._resolver, arguments.path)
+    def prepare(
+        self,
+        call_id: str,
+        arguments: SearchTextArguments,
+    ) -> PreparedToolCall | ToolError:
+        resolved = _prepare_directory(self._resolver, arguments.path)
+        if isinstance(resolved, ToolError):
+            return resolved
+        return self.prepared_call(
+            call_id,
+            arguments,
+            FileOperationFacts(target=resolved),
+        )
 
     def execute(
         self,
-        arguments: SearchTextArguments,
-        resolved: ResolvedPath,
+        prepared_call: PreparedToolCall,
     ) -> ToolExecutionResult:
+        prepared = _prepared_file_action(
+            prepared_call,
+            self.name,
+            SearchTextArguments,
+        )
+        if isinstance(prepared, ToolError):
+            return self._failure(prepared)
+        arguments, facts = prepared
+        resolved = facts.target
         mismatch = _validate_prepared_directory(arguments.path, resolved)
         if mismatch is not None:
             return self._failure(mismatch)

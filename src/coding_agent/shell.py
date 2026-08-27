@@ -3,19 +3,21 @@
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 import threading
 from ctypes import Structure, byref, c_size_t, c_ulonglong, sizeof
 from ctypes import wintypes
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import BinaryIO
 
 from pydantic import Field
 
 from .protocol import ToolCapability, ToolError, ToolKind, ToolOutcome
-from .tooling import Tool, ToolArguments, ToolExecutionResult
+from .tooling import PreparedToolCall, Tool, ToolArguments, ToolExecutionResult
 from .workspace import PathResolutionMode, ResolvedPath, WorkspacePathResolver
 
 
@@ -49,6 +51,266 @@ class ShellContent:
     stderr: str
     stdout_truncated: bool
     stderr_truncated: bool
+
+
+class ShellRiskAction(StrEnum):
+    """Recognizable surface actions needed by the v1 risk policy."""
+
+    DEPENDENCY_INSTALL = "DEPENDENCY_INSTALL"
+    NETWORK_ACCESS = "NETWORK_ACCESS"
+    GIT_MUTATION = "GIT_MUTATION"
+    GIT_REMOTE_WRITE = "GIT_REMOTE_WRITE"
+    FILE_DELETION = "FILE_DELETION"
+    PRIVILEGE_ESCALATION = "PRIVILEGE_ESCALATION"
+    SYSTEM_CONFIGURATION = "SYSTEM_CONFIGURATION"
+    SHUTDOWN_OR_REBOOT = "SHUTDOWN_OR_REBOOT"
+    BACKGROUND_OR_DETACHED_PROCESS = "BACKGROUND_OR_DETACHED_PROCESS"
+    INTERACTIVE_COMMAND = "INTERACTIVE_COMMAND"
+
+
+@dataclass(frozen=True, slots=True)
+class ShellSurfaceFacts:
+    """Deterministic lexical facts; never a permission decision."""
+
+    recognized_actions: frozenset[ShellRiskAction]
+    has_compound_syntax: bool
+    has_unknown_segment: bool
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "recognized_actions", frozenset(self.recognized_actions))
+
+
+@dataclass(frozen=True, slots=True)
+class ShellOperationFacts:
+    """Validated command, cwd, timeout, and surface facts for exact execution."""
+
+    command: str
+    cwd: ResolvedPath
+    effective_timeout_seconds: int
+    surface_facts: ShellSurfaceFacts
+
+
+_COMPOUND_SYNTAX = re.compile(r"&&|\|\||[|;<>&]|\$\(|`|[\r\n]")
+_AMBIGUOUS_COMPOSITION = re.compile(r"[<>]|\$\(|`|[()]")
+_SEGMENT_SEPARATOR = re.compile(r"&&|\|\||[|;\r\n]")
+_TOKEN = re.compile(r'''"[^"]*"|'[^']*'|[^\s]+''')
+_SAFE_EXECUTABLES = frozenset(
+    {
+        "bash",
+        "cargo",
+        "clang",
+        "clang++",
+        "cmake",
+        "dotnet",
+        "gcc",
+        "g++",
+        "go",
+        "gradle",
+        "java",
+        "javac",
+        "make",
+        "mvn",
+        "node",
+        "npx",
+        "pytest",
+        "python",
+        "python3",
+        "ruby",
+        "rustc",
+        "sh",
+        "tsc",
+    }
+)
+
+
+def classify_shell_surface(command: str) -> ShellSurfaceFacts:
+    """Recognize common risk-relevant command surface without parsing a shell AST."""
+    actions: set[ShellRiskAction] = set()
+    has_compound_syntax = bool(_COMPOUND_SYNTAX.search(command))
+    has_unknown_segment = bool(_AMBIGUOUS_COMPOSITION.search(command))
+
+    if re.search(r"(?<!&)&\s*$", command):
+        actions.add(ShellRiskAction.BACKGROUND_OR_DETACHED_PROCESS)
+
+    segments = [segment.strip() for segment in _SEGMENT_SEPARATOR.split(command)]
+    for segment in segments:
+        if not segment:
+            has_unknown_segment = True
+            continue
+        segment_actions, known = _classify_shell_segment(segment)
+        actions.update(segment_actions)
+        if not known:
+            has_unknown_segment = True
+
+    return ShellSurfaceFacts(
+        recognized_actions=frozenset(actions),
+        has_compound_syntax=has_compound_syntax,
+        has_unknown_segment=has_unknown_segment,
+    )
+
+
+def _classify_shell_segment(
+    segment: str,
+) -> tuple[set[ShellRiskAction], bool]:
+    tokens = [_unquote(token) for token in _TOKEN.findall(segment)]
+    if not tokens:
+        return set(), False
+    executable = _command_name(tokens[0])
+    lowered = [token.casefold() for token in tokens]
+    actions: set[ShellRiskAction] = set()
+
+    if executable in {"sudo", "su", "runas"} or (
+        executable in {"start-process", "start"}
+        and any(token in {"-verb", "/verb"} for token in lowered)
+        and "runas" in lowered
+    ):
+        actions.add(ShellRiskAction.PRIVILEGE_ESCALATION)
+    if executable in {"shutdown", "reboot", "restart-computer", "stop-computer"}:
+        actions.add(ShellRiskAction.SHUTDOWN_OR_REBOOT)
+    if executable in {"rm", "rmdir", "del", "erase", "remove-item"}:
+        actions.add(ShellRiskAction.FILE_DELETION)
+    if executable in {"nohup"} or executable == "start-process":
+        actions.add(ShellRiskAction.BACKGROUND_OR_DETACHED_PROCESS)
+    if executable in {"vim", "vi", "nano", "emacs", "less", "more"}:
+        actions.add(ShellRiskAction.INTERACTIVE_COMMAND)
+    if executable in {"curl", "wget", "ssh", "scp", "sftp", "ftp", "iwr", "irm", "invoke-webrequest", "invoke-restmethod"}:
+        actions.add(ShellRiskAction.NETWORK_ACCESS)
+    if executable in {"setx", "bcdedit"} or (
+        executable == "reg" and len(lowered) > 1 and lowered[1] in {"add", "delete", "import", "restore"}
+    ) or (
+        executable in {"sc", "sc.exe"}
+        and len(lowered) > 1
+        and lowered[1] in {"config", "create", "delete", "start", "stop"}
+    ) or (
+        executable == "systemctl"
+        and any(token in {"enable", "disable", "start", "stop", "restart"} for token in lowered[1:])
+    ):
+        actions.add(ShellRiskAction.SYSTEM_CONFIGURATION)
+
+    if _is_dependency_change(executable, lowered):
+        actions.add(ShellRiskAction.DEPENDENCY_INSTALL)
+    if executable in {"npm", "pnpm", "yarn"} and len(lowered) > 1:
+        if lowered[1] in {"login", "publish"}:
+            actions.add(ShellRiskAction.NETWORK_ACCESS)
+    git_known = True
+    if executable == "git":
+        git_actions, git_known = _classify_git(lowered[1:])
+        actions.update(git_actions)
+
+    nested_shell = executable in {"cmd", "cmd.exe", "powershell", "pwsh"} and any(
+        token in {"/c", "-c", "-command"} for token in lowered[1:]
+    )
+    known = bool(actions) or executable in _SAFE_EXECUTABLES or executable == "git"
+    if executable in {"pip", "pip3", "npm", "pnpm", "yarn"}:
+        known = True
+    if nested_shell:
+        known = False
+    if executable == "git" and not git_known:
+        known = False
+    return actions, known
+
+
+def _is_dependency_change(executable: str, tokens: list[str]) -> bool:
+    mutation_commands = {"add", "install", "remove", "uninstall", "update", "upgrade"}
+    if executable in {"pip", "pip3", "npm", "pnpm", "yarn"}:
+        return len(tokens) > 1 and tokens[1] in mutation_commands
+    if executable in {"apt", "apt-get", "dnf", "yum", "brew", "choco", "winget"}:
+        return any(token in mutation_commands for token in tokens[1:])
+    if executable in {"python", "python3"} and len(tokens) > 3:
+        return tokens[1:4] in (["-m", "pip", "install"], ["-m", "pip", "uninstall"])
+    if executable == "cargo" and len(tokens) > 1:
+        return tokens[1] in {"add", "install", "remove", "uninstall", "update"}
+    return False
+
+
+def _classify_git(
+    arguments: list[str],
+) -> tuple[set[ShellRiskAction], bool]:
+    subcommand = _git_subcommand(arguments)
+    if subcommand is None:
+        return set(), False
+    if subcommand == "push":
+        return {
+            ShellRiskAction.GIT_MUTATION,
+            ShellRiskAction.GIT_REMOTE_WRITE,
+            ShellRiskAction.NETWORK_ACCESS,
+        }, True
+    if subcommand in {"fetch", "pull", "clone"}:
+        return {
+            ShellRiskAction.GIT_MUTATION,
+            ShellRiskAction.NETWORK_ACCESS,
+        }, True
+    if subcommand in {
+        "add",
+        "am",
+        "apply",
+        "bisect",
+        "branch",
+        "cherry-pick",
+        "clean",
+        "commit",
+        "config",
+        "checkout",
+        "merge",
+        "mv",
+        "rebase",
+        "reset",
+        "restore",
+        "remote",
+        "revert",
+        "rm",
+        "stash",
+        "switch",
+        "tag",
+        "worktree",
+    }:
+        return {ShellRiskAction.GIT_MUTATION}, True
+    if subcommand in {
+        "blame",
+        "cat-file",
+        "describe",
+        "diff",
+        "grep",
+        "help",
+        "log",
+        "ls-files",
+        "ls-tree",
+        "rev-parse",
+        "shortlog",
+        "show",
+        "status",
+        "version",
+    }:
+        return set(), True
+    return {ShellRiskAction.GIT_MUTATION}, True
+
+
+def _git_subcommand(arguments: list[str]) -> str | None:
+    index = 0
+    options_with_values = {"-c", "--git-dir", "--work-tree", "--namespace"}
+    while index < len(arguments):
+        token = arguments[index]
+        if token in options_with_values:
+            index += 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return token
+    return None
+
+
+def _command_name(token: str) -> str:
+    name = token.replace("\\", "/").rsplit("/", 1)[-1].casefold()
+    if name.endswith(".exe"):
+        name = name[:-4]
+    return name
+
+
+def _unquote(token: str) -> str:
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in {'"', "'"}:
+        return token[1:-1]
+    return token
 
 
 class _BoundedStreamCapture:
@@ -212,7 +474,11 @@ class ShellTool(Tool[ShellArguments]):
             frozenset(name.casefold() for name in excluded_environment_names),
         )
 
-    def prepare(self, arguments: ShellArguments) -> ResolvedPath | ToolError:
+    def prepare(
+        self,
+        call_id: str,
+        arguments: ShellArguments,
+    ) -> PreparedToolCall | ToolError:
         """Resolve the requested existing cwd and validate directory shape."""
         try:
             resolved = self._resolver.resolve_workspace_path(
@@ -225,21 +491,59 @@ class ShellTool(Tool[ShellArguments]):
             return self._error("CWD_RESOLUTION_FAILED", "shell cwd could not be resolved")
 
         if not resolved.is_within_workspace:
-            return resolved
+            return self.prepared_call(
+                call_id,
+                arguments,
+                ShellOperationFacts(
+                    command=arguments.command,
+                    cwd=resolved,
+                    effective_timeout_seconds=(
+                        arguments.timeout_seconds or self._default_timeout_seconds
+                    ),
+                    surface_facts=classify_shell_surface(arguments.command),
+                ),
+            )
         try:
             is_directory = resolved.resolved_path.is_dir()
         except OSError:
             return self._error("CWD_READ_FAILED", "shell cwd metadata could not be read")
         if not is_directory:
             return self._error("CWD_NOT_DIRECTORY", "shell cwd is not a directory")
-        return resolved
+        return self.prepared_call(
+            call_id,
+            arguments,
+            ShellOperationFacts(
+                command=arguments.command,
+                cwd=resolved,
+                effective_timeout_seconds=(
+                    arguments.timeout_seconds or self._default_timeout_seconds
+                ),
+                surface_facts=classify_shell_surface(arguments.command),
+            ),
+        )
 
     def execute(
         self,
-        arguments: ShellArguments,
-        resolved: ResolvedPath,
+        prepared_call: PreparedToolCall,
     ) -> ToolExecutionResult:
         """Execute an already resolved and permitted command action."""
+        if (
+            prepared_call.tool_identity.name != self.name
+            or not isinstance(prepared_call.validated_arguments, ShellArguments)
+            or not isinstance(prepared_call.operation_facts, ShellOperationFacts)
+        ):
+            return self._failure(
+                "INTERNAL_TOOL_ERROR",
+                "prepared call does not match shell",
+            )
+        arguments = prepared_call.validated_arguments
+        facts = prepared_call.operation_facts
+        resolved = facts.cwd
+        if facts.command != arguments.command:
+            return self._failure(
+                "INTERNAL_TOOL_ERROR",
+                "prepared command does not match shell arguments",
+            )
         if resolved.raw_path != arguments.cwd:
             return self._failure(
                 "INTERNAL_TOOL_ERROR",
@@ -250,7 +554,7 @@ class ShellTool(Tool[ShellArguments]):
                 "outside-workspace cwd requires policy evaluation before execution"
             )
 
-        timeout_seconds = arguments.timeout_seconds or self._default_timeout_seconds
+        timeout_seconds = facts.effective_timeout_seconds
         environment = self._filtered_environment()
         process: subprocess.Popen[bytes] | None = None
         windows_job: _WindowsJob | None = None
@@ -426,8 +730,12 @@ class ShellTool(Tool[ShellArguments]):
 
 
 __all__ = [
+    "ShellOperationFacts",
     "ShellArguments",
     "ShellBackend",
     "ShellContent",
+    "ShellRiskAction",
+    "ShellSurfaceFacts",
     "ShellTool",
+    "classify_shell_surface",
 ]

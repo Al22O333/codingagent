@@ -12,7 +12,8 @@ from coding_agent.search_text import (
     SearchTextContent,
     SearchTextTool,
 )
-from coding_agent.workspace import ResolvedPath, WorkspacePathResolver
+from coding_agent.tooling import PreparedToolCall
+from coding_agent.workspace import WorkspacePathResolver
 
 
 def _tool(
@@ -29,9 +30,9 @@ def _tool(
 
 
 def _execute(tool: SearchTextTool, arguments: SearchTextArguments):
-    prepared = tool.prepare(arguments)
-    assert isinstance(prepared, ResolvedPath)
-    return tool.execute(arguments, prepared)
+    prepared = tool.prepare("search", arguments)
+    assert isinstance(prepared, PreparedToolCall)
+    return tool.execute(prepared)
 
 
 def test_literal_search_is_case_insensitive_by_default(tmp_path: Path) -> None:

@@ -9,8 +9,13 @@ from typing import Self
 from pydantic import Field, model_validator
 
 from .protocol import ToolCapability, ToolError, ToolKind, ToolOutcome
-from .tooling import Tool, ToolArguments, ToolExecutionResult
-from .workspace import PathResolutionMode, ResolvedPath, WorkspacePathResolver
+from .tooling import PreparedToolCall, Tool, ToolArguments, ToolExecutionResult
+from .workspace import (
+    FileOperationFacts,
+    PathResolutionMode,
+    ResolvedPath,
+    WorkspacePathResolver,
+)
 
 
 class ReadFileArguments(ToolArguments):
@@ -67,7 +72,11 @@ class ReadFileTool(Tool[ReadFileArguments]):
         object.__setattr__(self, "_max_lines", max_lines)
         object.__setattr__(self, "_max_bytes", max_bytes)
 
-    def prepare(self, arguments: ReadFileArguments) -> ResolvedPath | ToolError:
+    def prepare(
+        self,
+        call_id: str,
+        arguments: ReadFileArguments,
+    ) -> PreparedToolCall | ToolError:
         """Resolve the existing target and return facts or an expected error."""
         try:
             resolved = self._resolver.resolve_workspace_path(
@@ -84,7 +93,11 @@ class ReadFileTool(Tool[ReadFileArguments]):
             )
 
         if not resolved.is_within_workspace:
-            return resolved
+            return self.prepared_call(
+                call_id,
+                arguments,
+                FileOperationFacts(target=resolved),
+            )
 
         try:
             target_mode = resolved.resolved_path.stat().st_mode
@@ -99,14 +112,29 @@ class ReadFileTool(Tool[ReadFileArguments]):
 
         if not stat.S_ISREG(target_mode):
             return self._error("NOT_A_FILE", "path is not a file", arguments.path)
-        return resolved
+        return self.prepared_call(
+            call_id,
+            arguments,
+            FileOperationFacts(target=resolved),
+        )
 
     def execute(
         self,
-        arguments: ReadFileArguments,
-        resolved: ResolvedPath,
+        prepared_call: PreparedToolCall,
     ) -> ToolExecutionResult:
         """Read an already resolved and policy-approved workspace target."""
+        if (
+            prepared_call.tool_identity.name != self.name
+            or not isinstance(prepared_call.validated_arguments, ReadFileArguments)
+            or not isinstance(prepared_call.operation_facts, FileOperationFacts)
+        ):
+            return self._failure(
+                "INTERNAL_TOOL_ERROR",
+                "prepared call does not match read_file",
+                "<unknown>",
+            )
+        arguments = prepared_call.validated_arguments
+        resolved = prepared_call.operation_facts.target
         if resolved.raw_path != arguments.path:
             return self._failure(
                 "INTERNAL_TOOL_ERROR",

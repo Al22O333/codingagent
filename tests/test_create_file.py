@@ -10,7 +10,8 @@ from coding_agent.create_file import (
     CreateFileTool,
 )
 from coding_agent.protocol import ToolError, ToolOutcome
-from coding_agent.workspace import ResolvedPath, WorkspacePathResolver
+from coding_agent.tooling import PreparedToolCall
+from coding_agent.workspace import WorkspacePathResolver
 
 
 def test_create_file_writes_utf8_and_reports_bytes(tmp_path: Path) -> None:
@@ -18,10 +19,10 @@ def test_create_file_writes_utf8_and_reports_bytes(tmp_path: Path) -> None:
     workspace.mkdir()
     tool = CreateFileTool(WorkspacePathResolver(workspace))
     arguments = CreateFileArguments(path="hello.txt", content="你好\n")
-    prepared = tool.prepare(arguments)
-    assert isinstance(prepared, ResolvedPath)
+    prepared = tool.prepare("create", arguments)
+    assert isinstance(prepared, PreparedToolCall)
 
-    result = tool.execute(arguments, prepared)
+    result = tool.execute(prepared)
 
     expected = "你好\n".encode("utf-8")
     assert result.outcome is ToolOutcome.SUCCESS
@@ -40,6 +41,7 @@ def test_existing_target_is_rejected_during_preparation(tmp_path: Path) -> None:
     tool = CreateFileTool(WorkspacePathResolver(workspace))
 
     prepared = tool.prepare(
+        "existing",
         CreateFileArguments(path="existing.txt", content="replacement")
     )
 
@@ -54,6 +56,7 @@ def test_missing_direct_parent_is_rejected_without_mkdir(tmp_path: Path) -> None
     tool = CreateFileTool(WorkspacePathResolver(workspace))
 
     prepared = tool.prepare(
+        "missing-parent",
         CreateFileArguments(path="missing/child.txt", content="content")
     )
 
@@ -70,11 +73,11 @@ def test_exclusive_create_rejects_target_created_after_preparation(
     target = workspace / "raced.txt"
     tool = CreateFileTool(WorkspacePathResolver(workspace))
     arguments = CreateFileArguments(path="raced.txt", content="agent")
-    prepared = tool.prepare(arguments)
-    assert isinstance(prepared, ResolvedPath)
+    prepared = tool.prepare("race", arguments)
+    assert isinstance(prepared, PreparedToolCall)
     target.write_text("other process", encoding="utf-8")
 
-    result = tool.execute(arguments, prepared)
+    result = tool.execute(prepared)
 
     assert result.outcome is ToolOutcome.OPERATION_FAILURE
     assert result.error is not None
@@ -87,10 +90,10 @@ def test_empty_file_creation_is_supported(tmp_path: Path) -> None:
     workspace.mkdir()
     tool = CreateFileTool(WorkspacePathResolver(workspace))
     arguments = CreateFileArguments(path="empty.txt", content="")
-    prepared = tool.prepare(arguments)
-    assert isinstance(prepared, ResolvedPath)
+    prepared = tool.prepare("empty", arguments)
+    assert isinstance(prepared, PreparedToolCall)
 
-    result = tool.execute(arguments, prepared)
+    result = tool.execute(prepared)
 
     assert result.outcome is ToolOutcome.SUCCESS
     assert isinstance(result.content, CreateFileContent)
