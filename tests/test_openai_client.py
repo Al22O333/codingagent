@@ -9,6 +9,8 @@ import httpx
 import pytest
 from openai import APITimeoutError, BadRequestError
 
+from coding_agent.context import ContextManager
+from coding_agent.interaction import FakeUserInteraction
 from coding_agent.model_client import (
     FatalProviderError,
     ModelProtocolError,
@@ -31,6 +33,9 @@ from coding_agent.protocol import (
     ToolSpec,
     UserMessage,
 )
+from coding_agent.policy import PolicyEngine
+from coding_agent.runtime import AgentRuntime, RunState, RuntimeLimits
+from coding_agent.tooling import ToolRegistry
 
 
 class FakeCompletions:
@@ -56,11 +61,13 @@ def _response(
     *,
     text: str | None,
     tool_calls: list[object] | None = None,
+    finish_reason: str = "stop",
 ) -> object:
     return SimpleNamespace(
         choices=[
             SimpleNamespace(
-                message=SimpleNamespace(content=text, tool_calls=tool_calls or [])
+                message=SimpleNamespace(content=text, tool_calls=tool_calls or []),
+                finish_reason=finish_reason,
             )
         ],
         usage=SimpleNamespace(
@@ -123,6 +130,7 @@ def test_read_file_tool_call_smoke_preserves_identity_and_raw_arguments() -> Non
     client, sdk = _client(
         _response(
             text=None,
+            finish_reason="tool_calls",
             tool_calls=[
                 _provider_call("read_file", '{"path":"main.py","start_line":2}')
             ],
@@ -198,6 +206,7 @@ def test_malformed_arguments_remain_call_level_validation_input() -> None:
     client, _ = _client(
         _response(
             text=None,
+            finish_reason="tool_calls",
             tool_calls=[_provider_call("read_file", "{not-json")],
         )
     )
@@ -225,6 +234,7 @@ def test_missing_call_id_is_generated_but_duplicate_ids_are_protocol_error() -> 
     client, _ = _client(
         _response(
             text=None,
+            finish_reason="tool_calls",
             tool_calls=[_provider_call("read_file", "{}", call_id=None)],
         )
     )
@@ -234,6 +244,7 @@ def test_missing_call_id_is_generated_but_duplicate_ids_are_protocol_error() -> 
     duplicate_client, _ = _client(
         _response(
             text=None,
+            finish_reason="tool_calls",
             tool_calls=[
                 _provider_call("read_file", "{}", "same"),
                 _provider_call("read_file", "{}", "same"),
@@ -256,6 +267,45 @@ def test_provider_exceptions_are_normalized() -> None:
     )
     with pytest.raises(FatalProviderError):
         fatal_client.complete(ModelRequest(messages=(UserMessage("Hi"),)))
+
+
+@pytest.mark.parametrize("finish_reason", ["length", "content_filter", "aborted"])
+def test_incomplete_or_unknown_finish_reason_is_protocol_error(
+    finish_reason: str,
+) -> None:
+    client, _ = _client(_response(text="Partial answer", finish_reason=finish_reason))
+
+    with pytest.raises(ModelProtocolError, match="finish reason"):
+        client.complete(ModelRequest(messages=(UserMessage("Complete it"),)))
+
+
+def test_truncated_provider_response_cannot_complete_runtime() -> None:
+    sdk = FakeSDK(
+        [
+            _response(text="Partial answer", finish_reason="length"),
+            _response(text="Complete answer", finish_reason="stop"),
+        ]
+    )
+    client = OpenAICompatibleModelClient(
+        OpenAICompatibleConfig(model="test-model", api_key="test-key"),
+        sdk_client=sdk,
+    )
+    runtime = AgentRuntime(
+        client,
+        ContextManager(),
+        ToolRegistry(),
+        RuntimeLimits(5, 5, 30, 0, 2),
+        policy_engine=PolicyEngine(),
+        user_interaction=FakeUserInteraction(),
+        sleep_fn=lambda _: None,
+    )
+
+    run = runtime.run("Complete the task")
+
+    assert run.state is RunState.COMPLETED
+    assert run.final_response == "Complete answer"
+    assert run.model_turns == 2
+    assert len(sdk.completions.calls) == 2
 
 
 def test_config_rejects_missing_required_values() -> None:

@@ -5,7 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
-from time import monotonic
+from math import isfinite
+from time import monotonic, sleep
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -177,7 +178,22 @@ class AgentRuntime:
         policy_engine: PolicyEngine,
         user_interaction: UserInteraction,
         clock: Callable[[], float] = monotonic,
+        sleep_fn: Callable[[float], None] = sleep,
+        transport_retry_base_delay_seconds: float = 0.25,
+        transport_retry_max_delay_seconds: float = 2.0,
     ) -> None:
+        if (
+            not isfinite(transport_retry_base_delay_seconds)
+            or transport_retry_base_delay_seconds < 0
+        ):
+            raise ValueError("transport retry base delay must be finite and non-negative")
+        if (
+            not isfinite(transport_retry_max_delay_seconds)
+            or transport_retry_max_delay_seconds < transport_retry_base_delay_seconds
+        ):
+            raise ValueError(
+                "transport retry maximum delay must be finite and cover the base delay"
+            )
         self._model_client = model_client
         self._context_manager = context_manager
         self._tool_registry = tool_registry
@@ -186,6 +202,11 @@ class AgentRuntime:
         self._policy_engine = policy_engine
         self._user_interaction = user_interaction
         self._clock = clock
+        self._sleep = sleep_fn
+        self._transport_retry_base_delay_seconds = (
+            transport_retry_base_delay_seconds
+        )
+        self._transport_retry_max_delay_seconds = transport_retry_max_delay_seconds
         self.session = Session()
 
     def run(self, task: str) -> AgentRun:
@@ -376,6 +397,7 @@ class AgentRuntime:
                     agent_run.termination_reason = TerminationReason.PROVIDER_FAILURE
                     self._refresh_active_duration(agent_run, run_started_at)
                     return None
+                self._sleep(self._transport_retry_delay(retries))
                 retries += 1
                 continue
             except FatalProviderError as error:
@@ -390,6 +412,14 @@ class AgentRuntime:
 
             agent_run.model_turns += 1
             return response
+
+    def _transport_retry_delay(self, retry_index: int) -> float:
+        delay = self._transport_retry_base_delay_seconds
+        for _ in range(retry_index):
+            delay = min(delay * 2, self._transport_retry_max_delay_seconds)
+            if delay >= self._transport_retry_max_delay_seconds:
+                break
+        return delay
 
     def _model_budget_exhausted(
         self,

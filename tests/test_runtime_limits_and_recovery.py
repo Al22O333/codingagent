@@ -67,6 +67,7 @@ def _registry(workspace: Path | None = None) -> ToolRegistry:
 
 
 def test_transport_retry_reuses_same_request_without_extra_model_turn() -> None:
+    delays: list[float] = []
     client = FakeModelClient(
         [TransientProviderError("temporary"), ModelResponse(text="Recovered.")]
     )
@@ -77,6 +78,7 @@ def test_transport_retry_reuses_same_request_without_extra_model_turn() -> None:
         _limits(transport_retries=1),
         policy_engine=PolicyEngine(),
         user_interaction=FakeUserInteraction(),
+        sleep_fn=delays.append,
     )
 
     run = runtime.run("Complete the task")
@@ -85,9 +87,11 @@ def test_transport_retry_reuses_same_request_without_extra_model_turn() -> None:
     assert run.model_turns == 1
     assert len(client.requests) == 2
     assert client.requests[0] is client.requests[1]
+    assert delays == [0.25]
 
 
 def test_transport_retry_exhaustion_fails_without_model_turn() -> None:
+    delays: list[float] = []
     client = FakeModelClient(
         [TransientProviderError("one"), TransientProviderError("two")]
     )
@@ -98,6 +102,7 @@ def test_transport_retry_exhaustion_fails_without_model_turn() -> None:
         _limits(transport_retries=1),
         policy_engine=PolicyEngine(),
         user_interaction=FakeUserInteraction(),
+        sleep_fn=delays.append,
     )
 
     run = runtime.run("Complete the task")
@@ -107,9 +112,11 @@ def test_transport_retry_exhaustion_fails_without_model_turn() -> None:
     assert run.model_turns == 0
     assert len(client.requests) == 2
     assert client.requests[0] is client.requests[1]
+    assert delays == [0.25]
 
 
 def test_fatal_provider_error_is_not_retried() -> None:
+    delays: list[float] = []
     client = FakeModelClient(
         [FatalProviderError("bad credential"), ModelResponse(text="unused")]
     )
@@ -120,6 +127,7 @@ def test_fatal_provider_error_is_not_retried() -> None:
         _limits(transport_retries=3),
         policy_engine=PolicyEngine(),
         user_interaction=FakeUserInteraction(),
+        sleep_fn=delays.append,
     )
 
     run = runtime.run("Complete the task")
@@ -128,6 +136,55 @@ def test_fatal_provider_error_is_not_retried() -> None:
     assert run.termination_reason is TerminationReason.PROVIDER_FAILURE
     assert run.model_turns == 0
     assert len(client.requests) == 1
+    assert delays == []
+
+
+def test_transport_retry_backoff_grows_and_is_bounded() -> None:
+    delays: list[float] = []
+    client = FakeModelClient(
+        [
+            TransientProviderError("one"),
+            TransientProviderError("two"),
+            TransientProviderError("three"),
+            ModelResponse(text="Recovered."),
+        ]
+    )
+    runtime = AgentRuntime(
+        client,
+        ContextManager(),
+        _registry(),
+        _limits(transport_retries=3),
+        policy_engine=PolicyEngine(),
+        user_interaction=FakeUserInteraction(),
+        sleep_fn=delays.append,
+        transport_retry_base_delay_seconds=0.1,
+        transport_retry_max_delay_seconds=0.15,
+    )
+
+    run = runtime.run("Complete the task")
+
+    assert run.state is RunState.COMPLETED
+    assert run.model_turns == 1
+    assert delays == [0.1, 0.15, 0.15]
+    assert len({id(request) for request in client.requests}) == 1
+
+
+def test_first_attempt_success_does_not_sleep() -> None:
+    delays: list[float] = []
+    runtime = AgentRuntime(
+        FakeModelClient([ModelResponse(text="Done.")]),
+        ContextManager(),
+        _registry(),
+        _limits(transport_retries=3),
+        policy_engine=PolicyEngine(),
+        user_interaction=FakeUserInteraction(),
+        sleep_fn=delays.append,
+    )
+
+    run = runtime.run("Complete the task")
+
+    assert run.state is RunState.COMPLETED
+    assert delays == []
 
 
 def test_invalid_response_consumes_turn_and_corrective_response_consumes_another() -> None:

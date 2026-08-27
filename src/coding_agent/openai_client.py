@@ -198,6 +198,14 @@ class OpenAICompatibleModelClient:
         if len(call_ids) != len(set(call_ids)):
             raise ModelProtocolError("provider response has duplicate tool call ids")
 
+        finish_reason = getattr(choices[0], "finish_reason", None)
+        expected_finish_reason = "tool_calls" if normalized_calls else "stop"
+        if finish_reason != expected_finish_reason:
+            raise ModelProtocolError(
+                "provider response did not complete with the expected finish reason: "
+                f"{finish_reason!r}"
+            )
+
         usage = _normalize_usage(getattr(response, "usage", None))
         return ModelResponse(
             text=text,
