@@ -143,6 +143,7 @@ def test_explicit_command_prohibition_stops_shell_before_launch(
         resolver,
         ShellBackend(executable=str(workspace / "missing-shell")),
         default_timeout_seconds=2,
+        max_timeout_seconds=10,
         max_stdout_bytes=100,
         max_stderr_bytes=100,
     )
@@ -176,6 +177,7 @@ def test_audit_command_prohibition_rejects_before_risk_permission(
         resolver,
         ShellBackend(executable=str(workspace / "missing-shell")),
         default_timeout_seconds=2,
+        max_timeout_seconds=10,
         max_stdout_bytes=100,
         max_stderr_bytes=100,
     )

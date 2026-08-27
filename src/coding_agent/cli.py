@@ -38,6 +38,7 @@ STARTUP_MESSAGE = "Coding Agent v1"
 _DEFAULT_SECRET_ENVIRONMENT_NAMES = frozenset(
     {"CODING_AGENT_API_KEY", "OPENAI_API_KEY"}
 )
+_MAX_SHELL_TIMEOUT_SECONDS = 5 * 60
 
 
 def _default_shell_executable() -> str:
@@ -136,6 +137,7 @@ def build_runtime(
             resolver,
             ShellBackend(config.shell_executable),
             default_timeout_seconds=60,
+            max_timeout_seconds=_MAX_SHELL_TIMEOUT_SECONDS,
             max_stdout_bytes=64 * 1024,
             max_stderr_bytes=64 * 1024,
             excluded_environment_names=(

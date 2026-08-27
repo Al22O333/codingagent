@@ -26,6 +26,7 @@ def _shell_tool(resolver: WorkspacePathResolver) -> ShellTool:
         resolver,
         ShellBackend(executable=executable),
         default_timeout_seconds=5,
+        max_timeout_seconds=30,
         max_stdout_bytes=100,
         max_stderr_bytes=100,
     )
@@ -137,6 +138,11 @@ def test_normal_and_simple_unknown_shell_commands_are_allowed(
     "command",
     [
         "pip install requests",
+        "uv add requests",
+        "uv remove requests",
+        "uv sync",
+        "uv pip install requests",
+        "uv pip uninstall requests",
         "curl https://example.invalid",
         "git commit -m change",
         "git push origin main",
@@ -170,6 +176,7 @@ def test_recognizable_high_risk_shell_actions_require_confirmation(
         "systemctl restart service",
         "nano main.py",
         "nohup pytest",
+        "start notepad",
     ],
 )
 def test_recognizable_prohibited_shell_actions_are_denied(
@@ -199,6 +206,11 @@ def test_compound_command_uses_highest_recognizable_risk(tmp_path: Path) -> None
         "confirm",
         ShellArguments(command="pytest && git push origin main"),
     )
+    dependency_confirm = _prepare(
+        tool,
+        "dependency-confirm",
+        ShellArguments(command="pytest && uv add requests"),
+    )
     deny = _prepare(
         tool,
         "deny",
@@ -207,6 +219,10 @@ def test_compound_command_uses_highest_recognizable_risk(tmp_path: Path) -> None
     policy = PolicyEngine()
 
     assert policy.check_risk_permission(confirm).decision is PermissionDecision.CONFIRM
+    assert (
+        policy.check_risk_permission(dependency_confirm).decision
+        is PermissionDecision.CONFIRM
+    )
     assert policy.check_risk_permission(deny).decision is PermissionDecision.DENY
 
 

@@ -35,6 +35,8 @@ def _tool(
     workspace: Path,
     *,
     backend: ShellBackend | None = None,
+    default_timeout_seconds: int = 5,
+    max_timeout_seconds: int = 30,
     max_stdout_bytes: int = 1024,
     max_stderr_bytes: int = 1024,
     excluded_environment_names: frozenset[str] = frozenset(),
@@ -42,7 +44,8 @@ def _tool(
     return ShellTool(
         WorkspacePathResolver(workspace),
         backend or _backend(),
-        default_timeout_seconds=5,
+        default_timeout_seconds=default_timeout_seconds,
+        max_timeout_seconds=max_timeout_seconds,
         max_stdout_bytes=max_stdout_bytes,
         max_stderr_bytes=max_stderr_bytes,
         excluded_environment_names=excluded_environment_names,
@@ -116,6 +119,39 @@ def test_timeout_is_operation_failure_and_captures_partial_output(
     assert result.error.code == "COMMAND_TIMEOUT"
     assert isinstance(result.content, ShellContent)
     assert "started" in result.content.stdout
+
+
+def test_timeout_preparation_uses_default_accepts_small_and_rejects_huge(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tool = _tool(
+        workspace,
+        default_timeout_seconds=5,
+        max_timeout_seconds=10,
+    )
+
+    default = tool.prepare("default", ShellArguments(command="pytest"))
+    small = tool.prepare(
+        "small",
+        ShellArguments(command="pytest", timeout_seconds=3),
+    )
+    huge = tool.prepare(
+        "huge",
+        ShellArguments(command="pytest", timeout_seconds=999_999_999),
+    )
+
+    assert isinstance(default, PreparedToolCall)
+    assert default.operation_facts.effective_timeout_seconds == 5  # type: ignore[union-attr]
+    assert isinstance(small, PreparedToolCall)
+    assert small.operation_facts.effective_timeout_seconds == 3  # type: ignore[union-attr]
+    assert isinstance(huge, ToolError)
+    assert huge.code == "TIMEOUT_EXCEEDS_MAXIMUM"
+    assert huge.details == {
+        "requested_timeout_seconds": 999_999_999,
+        "maximum_timeout_seconds": 10,
+    }
 
 
 def test_stdout_and_stderr_are_independently_bounded(tmp_path: Path) -> None:
@@ -222,6 +258,7 @@ def test_configured_environment_name_is_filtered(
     ("field", "value"),
     [
         ("default_timeout_seconds", 0),
+        ("max_timeout_seconds", 0),
         ("max_stdout_bytes", 0),
         ("max_stderr_bytes", 0),
     ],
@@ -235,6 +272,7 @@ def test_shell_tool_rejects_unbounded_configuration(
     workspace.mkdir()
     kwargs = {
         "default_timeout_seconds": 1,
+        "max_timeout_seconds": 2,
         "max_stdout_bytes": 1,
         "max_stderr_bytes": 1,
     }
@@ -242,3 +280,18 @@ def test_shell_tool_rejects_unbounded_configuration(
 
     with pytest.raises(ValueError):
         ShellTool(WorkspacePathResolver(workspace), _backend(), **kwargs)
+
+
+def test_shell_tool_rejects_default_timeout_above_maximum(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    with pytest.raises(ValueError, match="must not exceed"):
+        ShellTool(
+            WorkspacePathResolver(workspace),
+            _backend(),
+            default_timeout_seconds=6,
+            max_timeout_seconds=5,
+            max_stdout_bytes=1,
+            max_stderr_bytes=1,
+        )

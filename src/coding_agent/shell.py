@@ -169,7 +169,7 @@ def _classify_shell_segment(
         actions.add(ShellRiskAction.SHUTDOWN_OR_REBOOT)
     if executable in {"rm", "rmdir", "del", "erase", "remove-item"}:
         actions.add(ShellRiskAction.FILE_DELETION)
-    if executable in {"nohup"} or executable == "start-process":
+    if executable in {"nohup", "start", "start-process"}:
         actions.add(ShellRiskAction.BACKGROUND_OR_DETACHED_PROCESS)
     if executable in {"vim", "vi", "nano", "emacs", "less", "more"}:
         actions.add(ShellRiskAction.INTERACTIVE_COMMAND)
@@ -220,6 +220,14 @@ def _is_dependency_change(executable: str, tokens: list[str]) -> bool:
         return tokens[1:4] in (["-m", "pip", "install"], ["-m", "pip", "uninstall"])
     if executable == "cargo" and len(tokens) > 1:
         return tokens[1] in {"add", "install", "remove", "uninstall", "update"}
+    if executable == "uv" and len(tokens) > 1:
+        if tokens[1] in {"add", "remove", "sync"}:
+            return True
+        return (
+            len(tokens) > 2
+            and tokens[1] == "pip"
+            and tokens[2] in {"install", "uninstall"}
+        )
     return False
 
 
@@ -435,6 +443,7 @@ class ShellTool(Tool[ShellArguments]):
         "_backend",
         "_default_timeout_seconds",
         "_excluded_environment_names",
+        "_max_timeout_seconds",
         "_max_stderr_bytes",
         "_max_stdout_bytes",
         "_resolver",
@@ -446,12 +455,19 @@ class ShellTool(Tool[ShellArguments]):
         backend: ShellBackend,
         *,
         default_timeout_seconds: int,
+        max_timeout_seconds: int,
         max_stdout_bytes: int,
         max_stderr_bytes: int,
         excluded_environment_names: frozenset[str] = frozenset(),
     ) -> None:
         if default_timeout_seconds < 1:
             raise ValueError("default_timeout_seconds must be at least 1")
+        if max_timeout_seconds < 1:
+            raise ValueError("max_timeout_seconds must be at least 1")
+        if default_timeout_seconds > max_timeout_seconds:
+            raise ValueError(
+                "default_timeout_seconds must not exceed max_timeout_seconds"
+            )
         if max_stdout_bytes < 1:
             raise ValueError("max_stdout_bytes must be at least 1")
         if max_stderr_bytes < 1:
@@ -466,6 +482,7 @@ class ShellTool(Tool[ShellArguments]):
         object.__setattr__(self, "_resolver", resolver)
         object.__setattr__(self, "_backend", backend)
         object.__setattr__(self, "_default_timeout_seconds", default_timeout_seconds)
+        object.__setattr__(self, "_max_timeout_seconds", max_timeout_seconds)
         object.__setattr__(self, "_max_stdout_bytes", max_stdout_bytes)
         object.__setattr__(self, "_max_stderr_bytes", max_stderr_bytes)
         object.__setattr__(
@@ -480,6 +497,21 @@ class ShellTool(Tool[ShellArguments]):
         arguments: ShellArguments,
     ) -> PreparedToolCall | ToolError:
         """Resolve the requested existing cwd and validate directory shape."""
+        if (
+            arguments.timeout_seconds is not None
+            and arguments.timeout_seconds > self._max_timeout_seconds
+        ):
+            return self._error(
+                "TIMEOUT_EXCEEDS_MAXIMUM",
+                "requested shell timeout exceeds the configured maximum",
+                details={
+                    "requested_timeout_seconds": arguments.timeout_seconds,
+                    "maximum_timeout_seconds": self._max_timeout_seconds,
+                },
+            )
+        effective_timeout_seconds = (
+            arguments.timeout_seconds or self._default_timeout_seconds
+        )
         try:
             resolved = self._resolver.resolve_workspace_path(
                 arguments.cwd,
@@ -497,9 +529,7 @@ class ShellTool(Tool[ShellArguments]):
                 ShellOperationFacts(
                     command=arguments.command,
                     cwd=resolved,
-                    effective_timeout_seconds=(
-                        arguments.timeout_seconds or self._default_timeout_seconds
-                    ),
+                    effective_timeout_seconds=effective_timeout_seconds,
                     surface_facts=classify_shell_surface(arguments.command),
                 ),
             )
@@ -515,9 +545,7 @@ class ShellTool(Tool[ShellArguments]):
             ShellOperationFacts(
                 command=arguments.command,
                 cwd=resolved,
-                effective_timeout_seconds=(
-                    arguments.timeout_seconds or self._default_timeout_seconds
-                ),
+                effective_timeout_seconds=effective_timeout_seconds,
                 surface_facts=classify_shell_surface(arguments.command),
             ),
         )

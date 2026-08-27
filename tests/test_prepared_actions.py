@@ -106,6 +106,7 @@ def test_shell_preparation_contains_exact_execution_and_surface_facts(
         WorkspacePathResolver(workspace),
         ShellBackend(executable="unused-shell"),
         default_timeout_seconds=9,
+        max_timeout_seconds=30,
         max_stdout_bytes=10,
         max_stderr_bytes=10,
     )
@@ -138,6 +139,18 @@ def test_shell_preparation_contains_exact_execution_and_surface_facts(
         (
             "pip install pydantic",
             frozenset({ShellRiskAction.DEPENDENCY_INSTALL}),
+            False,
+            False,
+        ),
+        (
+            "uv add pydantic",
+            frozenset({ShellRiskAction.DEPENDENCY_INSTALL}),
+            False,
+            False,
+        ),
+        (
+            "start notepad",
+            frozenset({ShellRiskAction.BACKGROUND_OR_DETACHED_PROCESS}),
             False,
             False,
         ),
