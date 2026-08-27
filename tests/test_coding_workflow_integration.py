@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import NoReturn
@@ -165,3 +166,111 @@ def test_real_model_completes_inspect_edit_verify_workflow(tmp_path: Path) -> No
         (result.outcome, repr(result.content), result.error)
         for result in shell_results
     ]
+
+
+@pytest.mark.skipif(
+    not _HAS_PROVIDER,
+    reason="set CODING_AGENT_TEST_API_KEY and CODING_AGENT_TEST_MODEL",
+)
+def test_real_model_solves_natural_language_bug_report(tmp_path: Path) -> None:
+    workspace = tmp_path / "natural-bug-fix"
+    workspace.mkdir()
+    (workspace / "pricing.py").write_text(
+        "def discounted_price(price: int, discount: int) -> int:\n"
+        "    \"\"\"Return price after subtracting the discount.\"\"\"\n"
+        "    return price + discount\n",
+        encoding="utf-8",
+    )
+    (workspace / "test_pricing.py").write_text(
+        "import unittest\n\n"
+        "from pricing import discounted_price\n\n\n"
+        "class PricingTests(unittest.TestCase):\n"
+        "    def test_subtracts_discount(self):\n"
+        "        self.assertEqual(discounted_price(100, 15), 85)\n\n"
+        "    def test_zero_discount(self):\n"
+        "        self.assertEqual(discounted_price(42, 0), 42)\n\n\n"
+        "if __name__ == \"__main__\":\n"
+        "    unittest.main()\n",
+        encoding="utf-8",
+    )
+
+    assert _API_KEY is not None and _MODEL is not None
+    recording_client = RecordingModelClient(
+        OpenAICompatibleModelClient(
+            OpenAICompatibleConfig(
+                model=_MODEL,
+                api_key=_API_KEY,
+                base_url=_BASE_URL,
+            )
+        )
+    )
+    runtime = build_runtime(
+        CLIConfig(
+            workspace=workspace,
+            model=_MODEL,
+            api_key=_API_KEY,
+            base_url=_BASE_URL,
+            api_key_environment_name="CODING_AGENT_TEST_API_KEY",
+        ),
+        model_client=recording_client,
+        user_interaction=DiagnosticInteraction(),
+    )
+
+    run = runtime.run("这个项目有一个测试失败，帮我找到原因并修好。")
+
+    tool_calls = [
+        call
+        for response in recording_client.responses
+        for call in response.tool_calls
+    ]
+    assert run.state is RunState.COMPLETED, {
+        "termination_reason": run.termination_reason,
+        "last_error": repr(run.last_error),
+        "tool_names": [call.name for call in tool_calls],
+    }
+    assert run.final_response is not None and run.final_response.strip()
+    assert "return price - discount" in (workspace / "pricing.py").read_text(
+        encoding="utf-8"
+    )
+    verification = subprocess.run(
+        [sys.executable, "-m", "unittest", "-v"],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert verification.returncode == 0, verification.stderr
+
+    tool_names = [call.name for call in tool_calls]
+    assert any(
+        name in {"list_directory", "search_files", "search_text", "read_file"}
+        for name in tool_names
+    )
+    assert "edit_file" in tool_names
+    assert "shell" in tool_names
+    results = [
+        result
+        for request in recording_client.requests
+        for message in request.messages
+        if isinstance(message, ToolResultMessage)
+        for result in message.results
+    ]
+    assert any(
+        result.tool_name == "shell"
+        and result.outcome is ToolOutcome.SUCCESS
+        and isinstance(result.content, ShellContent)
+        and result.content.exit_code == 0
+        for result in results
+    )
+    for call in tool_calls:
+        arguments = call.raw_arguments
+        if not hasattr(arguments, "get"):
+            continue
+        for key in ("path", "cwd"):
+            value = arguments.get(key)
+            if not isinstance(value, str):
+                continue
+            candidate = Path(value)
+            if not candidate.is_absolute():
+                candidate = workspace / candidate
+            assert candidate.resolve(strict=False).is_relative_to(workspace.resolve())

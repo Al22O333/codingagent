@@ -147,71 +147,107 @@ class ReadFileTool(Tool[ReadFileArguments]):
             )
 
         try:
-            raw_content = resolved.resolved_path.read_bytes()
+            content = self._read_bounded(arguments, resolved)
         except FileNotFoundError:
             return self._failure(
                 "FILE_NOT_FOUND", "file disappeared before it could be read", arguments.path
             )
         except IsADirectoryError:
             return self._failure("NOT_A_FILE", "path is not a file", arguments.path)
-        except OSError:
-            return self._failure(
-                "FILE_READ_FAILED", "file could not be read", arguments.path
-            )
-
-        if b"\x00" in raw_content:
-            return self._failure(
-                "BINARY_FILE_UNSUPPORTED",
-                "binary files are not supported by read_file",
-                arguments.path,
-            )
-
-        try:
-            text = raw_content.decode("utf-8")
         except UnicodeDecodeError:
             return self._failure(
                 "TEXT_DECODING_FAILED",
                 "file is not valid UTF-8 text",
                 arguments.path,
             )
+        except _BinaryFileError:
+            return self._failure(
+                "BINARY_FILE_UNSUPPORTED",
+                "binary files are not supported by read_file",
+                arguments.path,
+            )
+        except OSError:
+            return self._failure(
+                "FILE_READ_FAILED", "file could not be read", arguments.path
+            )
 
-        content = self._build_content(arguments, resolved, text)
         return ToolExecutionResult(outcome=ToolOutcome.SUCCESS, content=content)
 
-    def _build_content(
+    def _read_bounded(
         self,
         arguments: ReadFileArguments,
         resolved: ResolvedPath,
-        text: str,
     ) -> ReadFileContent:
-        lines = text.splitlines()
-        total_lines = len(lines)
-        requested_last_line = min(arguments.end_line or total_lines, total_lines)
-        first_index = arguments.start_line - 1
         rendered_lines: list[str] = []
         returned_bytes = 0
         actual_end_line: int | None = None
         byte_truncated = False
+        total_lines = 0
+        line_number = 1
+        line_buffer = bytearray()
+        line_overflow = False
+        line_open = False
 
-        if first_index < total_lines and arguments.start_line <= requested_last_line:
-            for line_number in range(arguments.start_line, requested_last_line + 1):
-                if len(rendered_lines) >= self._max_lines:
-                    break
-                rendered = f"{line_number} | {lines[line_number - 1]}"
+        def capture_segment(segment: str) -> None:
+            nonlocal line_open, line_overflow
+            if not segment:
+                return
+            line_open = True
+            if not self._line_is_requested(arguments, line_number):
+                return
+            encoded = segment.encode("utf-8")
+            remaining = self._max_bytes - len(line_buffer)
+            if remaining > 0:
+                line_buffer.extend(encoded[:remaining])
+            if len(encoded) > remaining:
+                line_overflow = True
+
+        def finish_line() -> None:
+            nonlocal actual_end_line, byte_truncated, line_buffer
+            nonlocal line_number, line_open, line_overflow, returned_bytes
+            if (
+                self._line_is_requested(arguments, line_number)
+                and len(rendered_lines) < self._max_lines
+            ):
+                prefix = f"{line_number} | ".encode("utf-8")
+                encoded = prefix + bytes(line_buffer)
                 separator_bytes = 1 if rendered_lines else 0
-                encoded = rendered.encode("utf-8")
-                available_bytes = self._max_bytes - returned_bytes - separator_bytes
-                if available_bytes <= 0:
-                    break
-                if len(encoded) > available_bytes:
-                    if rendered_lines:
-                        break
-                    rendered = self._utf8_prefix(encoded, available_bytes)
-                    encoded = rendered.encode("utf-8")
-                    byte_truncated = True
-                rendered_lines.append(rendered)
-                returned_bytes += separator_bytes + len(encoded)
-                actual_end_line = line_number
+                available = self._max_bytes - returned_bytes - separator_bytes
+                if available > 0:
+                    if len(encoded) > available or line_overflow:
+                        if not rendered_lines:
+                            rendered = self._utf8_prefix(encoded, available)
+                            rendered_lines.append(rendered)
+                            returned_bytes += len(rendered.encode("utf-8"))
+                            actual_end_line = line_number
+                            byte_truncated = True
+                    else:
+                        rendered_lines.append(encoded.decode("utf-8"))
+                        returned_bytes += separator_bytes + len(encoded)
+                        actual_end_line = line_number
+            line_number += 1
+            line_buffer = bytearray()
+            line_overflow = False
+            line_open = False
+
+        with resolved.resolved_path.open(
+            "r",
+            encoding="utf-8",
+            errors="strict",
+            newline=None,
+        ) as stream:
+            while chunk := stream.read(64 * 1024):
+                if "\x00" in chunk:
+                    raise _BinaryFileError
+                segments = chunk.split("\n")
+                for index, segment in enumerate(segments):
+                    capture_segment(segment)
+                    if index < len(segments) - 1:
+                        finish_line()
+                        total_lines += 1
+            if line_open:
+                finish_line()
+                total_lines += 1
 
         truncated = byte_truncated or (
             actual_end_line is not None and actual_end_line < total_lines
@@ -226,6 +262,15 @@ class ReadFileTool(Tool[ReadFileArguments]):
             content="\n".join(rendered_lines),
             truncated=truncated,
             next_start_line=next_start_line,
+        )
+
+    @staticmethod
+    def _line_is_requested(
+        arguments: ReadFileArguments,
+        line_number: int,
+    ) -> bool:
+        return line_number >= arguments.start_line and (
+            arguments.end_line is None or line_number <= arguments.end_line
         )
 
     @staticmethod
@@ -247,6 +292,10 @@ class ReadFileTool(Tool[ReadFileArguments]):
             outcome=ToolOutcome.OPERATION_FAILURE,
             error=cls._error(code, message, path),
         )
+
+
+class _BinaryFileError(Exception):
+    """Internal signal that a streamed text read encountered a NUL byte."""
 
 
 __all__ = ["ReadFileArguments", "ReadFileContent", "ReadFileTool"]

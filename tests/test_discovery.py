@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 
 import pytest
 
@@ -185,3 +186,33 @@ def test_discovery_tools_reject_nonpositive_limits(
 
     with pytest.raises(ValueError):
         tool_type(WorkspacePathResolver(workspace), **{limit_name: 0})
+
+
+def test_search_files_stops_after_limit_plus_one_in_deterministic_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    for name in ("a.py", "b.py", "c.py"):
+        (workspace / name).write_text(name, encoding="utf-8")
+    late_directory = workspace / "z-late"
+    late_directory.mkdir()
+    (late_directory / "never.py").write_text("late", encoding="utf-8")
+    original_scandir = os.scandir
+
+    def guarded_scandir(path):  # type: ignore[no-untyped-def]
+        if Path(path) == late_directory:
+            raise AssertionError("search collected beyond limit + 1")
+        return original_scandir(path)
+
+    monkeypatch.setattr("coding_agent.discovery.os.scandir", guarded_scandir)
+
+    result = _execute(
+        SearchFilesTool(WorkspacePathResolver(workspace), max_results=2),
+        SearchFilesArguments(pattern="**/*.py"),
+    )
+
+    assert isinstance(result.content, SearchFilesContent)
+    assert result.content.matches == ("a.py", "b.py")
+    assert result.content.truncated is True

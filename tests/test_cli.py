@@ -22,6 +22,7 @@ from coding_agent.interaction import (
     UserInteractionError,
 )
 from coding_agent.model_client import FakeModelClient
+from coding_agent.model_client import FatalProviderError
 from coding_agent.protocol import ModelResponse, ToolCall, ToolOutcome
 from coding_agent.runtime import RunState
 from coding_agent.shell import ShellContent
@@ -224,5 +225,70 @@ def test_one_shot_main_starts_runtime_and_prints_final(
     output = capsys.readouterr().out
     assert exit_code == 0
     assert cli.STARTUP_MESSAGE in output
+    assert f"Workspace: {tmp_path.resolve()}" in output
+    assert "Model: test-model" in output
+    assert "Agent: running" in output
     assert "Finished from CLI." in output
     assert fake.requests[0].messages[0].text == "inspect the project"  # type: ignore[union-attr]
+
+
+def test_cli_shows_sanitized_tool_activity_without_arguments_or_secrets(
+    tmp_path: Path,
+) -> None:
+    secret = "super-secret-tool-argument"
+    output = StringIO()
+    client = FakeModelClient(
+        [
+            ModelResponse(
+                text=None,
+                tool_calls=(
+                    ToolCall(
+                        "edit",
+                        "edit_file",
+                        {
+                            "path": "src/main.py",
+                            "old_text": secret,
+                            "new_text": "replacement",
+                            "expected_count": 1,
+                        },
+                    ),
+                ),
+            ),
+            ModelResponse(text="Handled."),
+        ]
+    )
+    runtime = build_runtime(
+        _config(tmp_path),
+        model_client=client,
+        user_interaction=FakeUserInteraction(),
+        stdout=output,
+    )
+
+    cli._run_task(runtime, "Inspect the project", output)
+
+    rendered = output.getvalue()
+    assert "[tool] edit_file: src/main.py" in rendered
+    assert secret not in rendered
+    assert "replacement" not in rendered
+
+
+def test_cli_provider_failure_is_understandable_and_does_not_leak_secret(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secret = "super-secret-provider-key"
+    monkeypatch.setenv("CODING_AGENT_MODEL", "test-model")
+    monkeypatch.setenv("CODING_AGENT_API_KEY", secret)
+    fake = FakeModelClient([FatalProviderError(f"invalid API key: {secret}")])
+    monkeypatch.setattr(cli, "OpenAICompatibleModelClient", lambda config: fake)
+
+    exit_code = cli.main(["--workspace", str(tmp_path), "fix", "the", "bug"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Provider error:" in captured.out
+    assert secret not in captured.out
+    assert secret not in captured.err
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err

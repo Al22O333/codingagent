@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TextIO
@@ -27,8 +27,9 @@ from .interaction import (
 from .model_client import ModelClient
 from .openai_client import OpenAICompatibleConfig, OpenAICompatibleModelClient
 from .policy import PolicyEngine
+from .protocol import ToolCall
 from .read_file import ReadFileTool
-from .runtime import AgentRuntime, RunState, RuntimeLimits
+from .runtime import AgentRuntime, RunState, RuntimeLimits, TerminationReason
 from .search_text import SearchTextTool
 from .shell import ShellBackend, ShellTool
 from .tooling import ToolRegistry
@@ -168,6 +169,7 @@ def build_runtime(
         stdin or sys.stdin,
         stdout or sys.stdout,
     )
+    tool_activity = _tool_activity_writer(stdout) if stdout is not None else None
     return AgentRuntime(
         concrete_model_client,
         ContextManager(),
@@ -182,7 +184,34 @@ def build_runtime(
         workspace_resolver=resolver,
         policy_engine=PolicyEngine(),
         user_interaction=concrete_interaction,
+        tool_activity=tool_activity,
     )
+
+
+def _tool_activity_writer(stdout: TextIO) -> Callable[[ToolCall], None]:
+    def report(tool_call: ToolCall) -> None:
+        try:
+            stdout.write(
+                f"[tool] {tool_call.name}: {_tool_action_summary(tool_call)}\n"
+            )
+            stdout.flush()
+        except OSError as error:
+            raise UserInteractionError("terminal activity output failed") from error
+
+    return report
+
+
+def _tool_action_summary(tool_call: ToolCall) -> str:
+    arguments = tool_call.raw_arguments
+    if not isinstance(arguments, Mapping):
+        return "requested"
+    if tool_call.name == "shell":
+        cwd = arguments.get("cwd")
+        return f"command in {cwd}" if isinstance(cwd, str) else "command"
+    path = arguments.get("path")
+    if isinstance(path, str):
+        return path.replace("\r", " ").replace("\n", " ")[:200]
+    return "requested"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -205,12 +234,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         config = load_config(args.workspace)
-        runtime = build_runtime(config)
+        runtime = build_runtime(config, stdout=sys.stdout)
     except (OSError, ValueError) as error:
         print(f"Startup error: {error}", file=sys.stderr)
         return 2
 
     print(STARTUP_MESSAGE)
+    print(f"Workspace: {config.workspace.resolve(strict=True)}")
+    print(f"Model: {config.model}")
     if args.task:
         return _run_task(runtime, " ".join(args.task), sys.stdout)
 
@@ -228,6 +259,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _run_task(runtime: AgentRuntime, task: str, stdout: TextIO) -> int:
+    stdout.write("Agent: running\n")
+    stdout.flush()
     run = runtime.run(task)
     if run.state is RunState.COMPLETED:
         stdout.write(f"{run.final_response}\n")
@@ -235,12 +268,26 @@ def _run_task(runtime: AgentRuntime, task: str, stdout: TextIO) -> int:
     if run.state is RunState.CANCELLED:
         stdout.write("Run cancelled.\n")
         return 130
-    stdout.write(
-        "Run failed"
-        + (f": {run.termination_reason.value}" if run.termination_reason else "")
-        + "\n"
-    )
+    stdout.write(_failure_message(run.termination_reason, run.limit_reached) + "\n")
     return 1
+
+
+def _failure_message(
+    reason: TerminationReason | None,
+    limit_reached: str | None,
+) -> str:
+    if reason is TerminationReason.PROVIDER_FAILURE:
+        return "Provider error: request failed; check credentials, endpoint, and availability."
+    if reason is TerminationReason.PROTOCOL_FAILURE:
+        return "Model response error: the provider returned an unusable response."
+    if reason is TerminationReason.LIMIT_REACHED:
+        detail = f" ({limit_reached})" if limit_reached else ""
+        return f"Run limit reached{detail}."
+    if reason is TerminationReason.USER_INTERACTION_FAILURE:
+        return "Interaction error: terminal input or output failed."
+    if reason is TerminationReason.RUNTIME_FAILURE:
+        return "Runtime error: the Agent could not continue safely."
+    return "Run failed."
 
 
 __all__ = [

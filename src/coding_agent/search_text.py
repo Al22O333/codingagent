@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,12 +13,12 @@ from .discovery import (
     _glob_matches,
     _prepare_directory,
     _prepared_file_action,
-    _resolve_visible_entry,
     _validate_prepared_directory,
+    _walk_visible_files,
 )
 from .protocol import ToolCapability, ToolError, ToolKind, ToolOutcome
 from .tooling import PreparedToolCall, Tool, ToolArguments, ToolExecutionResult
-from .workspace import FileOperationFacts, ResolvedPath, WorkspacePathResolver
+from .workspace import FileOperationFacts, WorkspacePathResolver
 
 
 class SearchTextArguments(ToolArguments):
@@ -123,20 +122,42 @@ class SearchTextTool(Tool[SearchTextArguments]):
 
         try:
             ignore_rules = DiscoveryIgnoreRules(self._resolver.workspace_root)
-            files = self._visible_files(arguments, resolved, ignore_rules)
         except OSError:
             return self._failure(
                 ToolError(
                     code="SEARCH_FAILED",
-                    message="workspace text search could not enumerate files",
+                    message="workspace text search could not load ignore rules",
                     details={"path": arguments.path},
                 )
             )
+        files = iter(_walk_visible_files(self._resolver, resolved, ignore_rules))
 
         matches: list[TextMatch] = []
         truncated = False
-        for path, relative_path in files:
-            file_matches = self._search_file(path, relative_path, matcher)
+        while not truncated:
+            try:
+                path, relative_path, relative_to_start = next(files)
+            except StopIteration:
+                break
+            except OSError:
+                return self._failure(
+                    ToolError(
+                        code="SEARCH_FAILED",
+                        message="workspace text search could not enumerate files",
+                        details={"path": arguments.path},
+                    )
+                )
+            if arguments.file_glob is not None and not _glob_matches(
+                relative_to_start,
+                arguments.file_glob,
+            ):
+                continue
+            file_matches = self._search_file(
+                path,
+                relative_path,
+                matcher,
+                self._max_matches - len(matches) + 1,
+            )
             for match in file_matches:
                 if len(matches) >= self._max_matches:
                     truncated = True
@@ -165,80 +186,73 @@ class SearchTextTool(Tool[SearchTextArguments]):
         folded_query = arguments.query.casefold()
         return lambda line: folded_query in line.casefold()
 
-    def _visible_files(
-        self,
-        arguments: SearchTextArguments,
-        start: ResolvedPath,
-        ignore_rules: DiscoveryIgnoreRules,
-    ) -> list[tuple[Path, str]]:
-        files: list[tuple[Path, str]] = []
-        pending = [start.resolved_path]
-        while pending:
-            current = pending.pop()
-            with os.scandir(current) as iterator:
-                entries = sorted(
-                    iterator,
-                    key=lambda entry: (entry.name.casefold(), entry.name),
-                )
-            directories: list[Path] = []
-            for entry in entries:
-                entry_facts = _resolve_visible_entry(self._resolver, Path(entry.path))
-                if entry_facts is None:
-                    continue
-                resolved_entry, relative_path = entry_facts
-                is_directory = resolved_entry.resolved_path.is_dir()
-                if ignore_rules.ignores(relative_path, is_directory=is_directory):
-                    continue
-                if is_directory:
-                    if not entry.is_symlink():
-                        directories.append(resolved_entry.resolved_path)
-                    continue
-                if not resolved_entry.resolved_path.is_file():
-                    continue
-                relative_to_start = Path(entry.path).relative_to(
-                    start.resolved_path
-                ).as_posix()
-                if arguments.file_glob is not None and not _glob_matches(
-                    relative_to_start,
-                    arguments.file_glob,
-                ):
-                    continue
-                files.append((resolved_entry.resolved_path, relative_path))
-            pending.extend(reversed(directories))
-        files.sort(key=lambda item: (item[1].casefold(), item[1]))
-        return files
-
     def _search_file(
         self,
         path: Path,
         relative_path: str,
         matcher,
+        match_limit: int,
     ) -> list[TextMatch]:
-        try:
-            raw_content = path.read_bytes()
-        except OSError:
-            return []
-        if b"\x00" in raw_content:
-            return []
-        try:
-            text = raw_content.decode("utf-8")
-        except UnicodeDecodeError:
-            return []
-
+        max_scanned_line_bytes = max(self._max_line_bytes, 1024 * 1024)
         matches: list[TextMatch] = []
-        for line_number, line in enumerate(text.splitlines(), start=1):
-            if matcher(line):
-                rendered, line_truncated = self._bounded_line(line)
-                matches.append(
-                    TextMatch(
-                        relative_path=relative_path,
-                        line_number=line_number,
-                        line_text=rendered,
-                        line_truncated=line_truncated,
+        line_number = 1
+        line_buffer = bytearray()
+        line_overflow = False
+        line_open = False
+
+        def capture_segment(segment: str) -> None:
+            nonlocal line_open, line_overflow
+            if not segment:
+                return
+            line_open = True
+            if line_overflow:
+                return
+            encoded = segment.encode("utf-8")
+            remaining = max_scanned_line_bytes - len(line_buffer)
+            if len(encoded) > remaining:
+                line_overflow = True
+                line_buffer.clear()
+                return
+            line_buffer.extend(encoded)
+
+        def finish_line() -> None:
+            nonlocal line_buffer, line_number, line_open, line_overflow
+            if not line_overflow:
+                line = line_buffer.decode("utf-8")
+                if matcher(line) and len(matches) < match_limit:
+                    rendered, rendered_truncated = self._bounded_line(line)
+                    matches.append(
+                        TextMatch(
+                            relative_path=relative_path,
+                            line_number=line_number,
+                            line_text=rendered,
+                            line_truncated=rendered_truncated,
+                        )
                     )
-                )
-                if len(matches) > self._max_matches:
-                    break
+            line_number += 1
+            line_buffer = bytearray()
+            line_overflow = False
+            line_open = False
+
+        try:
+            with path.open(
+                "r",
+                encoding="utf-8",
+                errors="strict",
+                newline=None,
+            ) as stream:
+                while chunk := stream.read(64 * 1024):
+                    if "\x00" in chunk:
+                        return []
+                    segments = chunk.split("\n")
+                    for index, segment in enumerate(segments):
+                        capture_segment(segment)
+                        if index < len(segments) - 1:
+                            finish_line()
+                if line_open:
+                    finish_line()
+        except (OSError, UnicodeDecodeError):
+            return []
         return matches
 
     def _bounded_line(self, line: str) -> tuple[str, bool]:

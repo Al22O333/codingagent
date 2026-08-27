@@ -174,3 +174,57 @@ def test_search_text_rejects_nonpositive_limits(
             max_matches=max_matches,
             max_line_bytes=max_line_bytes,
         )
+
+
+def test_large_text_search_streams_without_read_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "large.txt").write_text(
+        "target\n" + ("x" * (2 * 1024 * 1024)) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        Path,
+        "read_bytes",
+        lambda self: (_ for _ in ()).throw(AssertionError("whole-file read")),
+    )
+
+    result = _execute(
+        _tool(workspace, max_matches=1),
+        SearchTextArguments(query="target"),
+    )
+
+    assert result.outcome is ToolOutcome.SUCCESS
+    assert isinstance(result.content, SearchTextContent)
+    assert [match.line_number for match in result.content.matches] == [1]
+
+
+def test_search_text_stops_before_later_files_after_truncation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "a.txt").write_text("target\ntarget\ntarget\n", encoding="utf-8")
+    later = workspace / "z.txt"
+    later.write_text("target\n", encoding="utf-8")
+    original_open = Path.open
+
+    def guarded_open(path: Path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if path == later:
+            raise AssertionError("search continued after truncation was known")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+
+    result = _execute(
+        _tool(workspace, max_matches=2),
+        SearchTextArguments(query="target"),
+    )
+
+    assert isinstance(result.content, SearchTextContent)
+    assert len(result.content.matches) == 2
+    assert result.content.truncated is True

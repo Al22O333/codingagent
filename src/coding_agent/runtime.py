@@ -1,4 +1,4 @@
-"""AgentRuntime with a minimal single-ToolCall local dispatch loop."""
+"""Agent runtime lifecycle, model orchestration, and Tool dispatch."""
 
 from __future__ import annotations
 
@@ -68,7 +68,7 @@ class RunState(StrEnum):
 
 
 class TerminationReason(StrEnum):
-    """Termination reasons exercised by the minimal runtime slice."""
+    """Normalized terminal reasons for an Agent Run."""
 
     PROTOCOL_FAILURE = "PROTOCOL_FAILURE"
     PROVIDER_FAILURE = "PROVIDER_FAILURE"
@@ -124,7 +124,7 @@ class RuntimeLimits:
 
 @dataclass(slots=True)
 class AgentRun:
-    """Minimal mutable state owned and advanced by AgentRuntime."""
+    """Mutable state owned and advanced by AgentRuntime."""
 
     run_id: str
     current_task: str
@@ -165,7 +165,7 @@ class Session:
 
 
 class AgentRuntime:
-    """Sole orchestrator for the current model-to-final vertical slice."""
+    """Sole orchestrator for Agent Runs and Tool-driven model turns."""
 
     def __init__(
         self,
@@ -181,6 +181,7 @@ class AgentRuntime:
         sleep_fn: Callable[[float], None] = sleep,
         transport_retry_base_delay_seconds: float = 0.25,
         transport_retry_max_delay_seconds: float = 2.0,
+        tool_activity: Callable[[ToolCall], None] | None = None,
     ) -> None:
         if (
             not isfinite(transport_retry_base_delay_seconds)
@@ -207,10 +208,11 @@ class AgentRuntime:
             transport_retry_base_delay_seconds
         )
         self._transport_retry_max_delay_seconds = transport_retry_max_delay_seconds
+        self._tool_activity = tool_activity
         self.session = Session()
 
     def run(self, task: str) -> AgentRun:
-        """Run one user task until a final response or current-slice failure."""
+        """Run one user task until a final response or terminal failure."""
         agent_run = AgentRun(run_id=str(uuid4()), current_task=task)
         run_started_at = self._clock()
         try:
@@ -372,6 +374,8 @@ class AgentRuntime:
                 batch_stopped = True
                 continue
 
+            if self._tool_activity is not None:
+                self._tool_activity(tool_call)
             dispatch = self._dispatch_tool_call(tool_call, agent_run)
             results.append(dispatch.result)
             if dispatch.ends_batch:
@@ -600,7 +604,7 @@ class AgentRuntime:
                 outcome=ToolOutcome.VALIDATION_ERROR,
                 error=ToolError(
                     code="UNSUPPORTED_TOOL_KIND",
-                    message="Step 8 runtime only dispatches executable LOCAL tools",
+                    message="runtime only dispatches executable LOCAL tools",
                 ),
             ))
 

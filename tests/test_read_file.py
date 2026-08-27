@@ -208,3 +208,29 @@ def test_constructor_requires_positive_output_limits(tmp_path: Path) -> None:
         ReadFileTool(resolver, max_lines=0, max_bytes=100)
     with pytest.raises(ValueError, match="max_bytes"):
         ReadFileTool(resolver, max_lines=10, max_bytes=0)
+
+
+def test_large_file_read_streams_without_whole_file_read_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "large.txt"
+    target.write_text("first\n" + ("x" * (2 * 1024 * 1024)) + "\nlast\n", encoding="utf-8")
+    monkeypatch.setattr(
+        Path,
+        "read_bytes",
+        lambda self: (_ for _ in ()).throw(AssertionError("whole-file read")),
+    )
+
+    tool = _tool(workspace, max_lines=1, max_bytes=32)
+    result = tool.execute(
+        _prepare_inside(tool, ReadFileArguments(path="large.txt"))
+    )
+
+    assert result.outcome is ToolOutcome.SUCCESS
+    assert isinstance(result.content, ReadFileContent)
+    assert result.content.total_lines == 3
+    assert result.content.content == "1 | first"
+    assert result.content.truncated is True

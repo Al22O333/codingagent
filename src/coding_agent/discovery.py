@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass
+from heapq import heappop, heappush
 from pathlib import Path, PurePosixPath
 
 from pathspec import PathSpec
@@ -271,7 +273,6 @@ class SearchFilesTool(Tool[SearchFilesArguments]):
                 )
             )
 
-        matches.sort(key=lambda path: (path.casefold(), path))
         truncated = len(matches) > self._max_results
         content = SearchFilesContent(
             pattern=arguments.pattern,
@@ -288,31 +289,57 @@ class SearchFilesTool(Tool[SearchFilesArguments]):
         ignore_rules: DiscoveryIgnoreRules,
     ) -> list[str]:
         matches: list[str] = []
-        pending = [start.resolved_path]
-        while pending:
-            current = pending.pop()
-            with os.scandir(current) as iterator:
-                entries = sorted(iterator, key=lambda entry: (entry.name.casefold(), entry.name))
-            for entry in entries:
-                entry_facts = _resolve_visible_entry(self._resolver, Path(entry.path))
-                if entry_facts is None:
-                    continue
-                resolved_entry, relative_path = entry_facts
-                is_directory = resolved_entry.resolved_path.is_dir()
-                if ignore_rules.ignores(relative_path, is_directory=is_directory):
-                    continue
-                if is_directory:
-                    if not entry.is_symlink():
-                        pending.append(resolved_entry.resolved_path)
-                    continue
-                if not resolved_entry.resolved_path.is_file():
-                    continue
-                relative_to_start = Path(entry.path).relative_to(
-                    start.resolved_path
-                ).as_posix()
-                if _glob_matches(relative_to_start, arguments.pattern):
-                    matches.append(relative_path)
+        for _, relative_path, relative_to_start in _walk_visible_files(
+            self._resolver,
+            start,
+            ignore_rules,
+        ):
+            if _glob_matches(relative_to_start, arguments.pattern):
+                matches.append(relative_path)
+                if len(matches) > self._max_results:
+                    break
         return matches
+
+
+def _walk_visible_files(
+    resolver: WorkspacePathResolver,
+    start: ResolvedPath,
+    ignore_rules: DiscoveryIgnoreRules,
+) -> Iterator[tuple[Path, str, str]]:
+    """Yield visible files in deterministic path order with bounded results upstream."""
+    pending: list[tuple[str, str, Path]] = []
+
+    def enqueue(directory: Path) -> None:
+        with os.scandir(directory) as iterator:
+            for entry in iterator:
+                path = Path(entry.path)
+                try:
+                    relative_path = path.relative_to(resolver.workspace_root).as_posix()
+                except ValueError:
+                    continue
+                heappush(
+                    pending,
+                    (relative_path.casefold(), relative_path, path),
+                )
+
+    enqueue(start.resolved_path)
+    while pending:
+        _, _, path = heappop(pending)
+        entry_facts = _resolve_visible_entry(resolver, path)
+        if entry_facts is None:
+            continue
+        resolved_entry, relative_path = entry_facts
+        is_directory = resolved_entry.resolved_path.is_dir()
+        if ignore_rules.ignores(relative_path, is_directory=is_directory):
+            continue
+        if is_directory:
+            if not path.is_symlink():
+                enqueue(resolved_entry.resolved_path)
+            continue
+        if not resolved_entry.resolved_path.is_file():
+            continue
+        relative_to_start = path.relative_to(start.resolved_path).as_posix()
+        yield resolved_entry.resolved_path, relative_path, relative_to_start
 
 
 def _prepare_directory(
