@@ -37,13 +37,19 @@ from .workspace import WorkspacePathResolver
 STARTUP_MESSAGE = "Coding Agent v1"
 
 
+def _default_shell_executable() -> str:
+    if os.name == "nt":
+        return os.environ.get("COMSPEC", "cmd.exe")
+    return "/bin/sh"
+
+
 @dataclass(frozen=True, slots=True)
 class CLIConfig:
     workspace: Path
     model: str
     api_key: str = field(repr=False)
     base_url: str | None = None
-    shell_executable: str = "cmd.exe" if os.name == "nt" else "/bin/sh"
+    shell_executable: str = field(default_factory=_default_shell_executable)
 
 
 class ConsoleUserInteraction:
@@ -100,7 +106,7 @@ def load_config(
         api_key=api_key,
         base_url=values.get("CODING_AGENT_BASE_URL") or None,
         shell_executable=values.get("CODING_AGENT_SHELL")
-        or ("cmd.exe" if os.name == "nt" else "/bin/sh"),
+        or _default_shell_executable(),
     )
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from io import StringIO
 from pathlib import Path
 
@@ -45,6 +46,21 @@ def test_config_loads_minimal_environment_without_exposing_secret(tmp_path: Path
         load_config(str(tmp_path), {"CODING_AGENT_API_KEY": "key"})
     with pytest.raises(ValueError, match="CODING_AGENT_API_KEY"):
         load_config(str(tmp_path), {"CODING_AGENT_MODEL": "model"})
+
+
+def test_default_windows_shell_uses_full_comspec_path(tmp_path: Path) -> None:
+    config = load_config(
+        str(tmp_path),
+        {
+            "CODING_AGENT_MODEL": "model",
+            "CODING_AGENT_API_KEY": "key",
+        },
+    )
+    if os.name == "nt":
+        assert config.shell_executable == os.environ["COMSPEC"]
+        assert Path(config.shell_executable).is_absolute()
+    else:
+        assert config.shell_executable == "/bin/sh"
 
 
 def test_composition_root_registers_complete_v1_toolset(tmp_path: Path) -> None:
