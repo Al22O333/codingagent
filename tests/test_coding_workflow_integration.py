@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import NoReturn
 
@@ -29,7 +30,6 @@ from coding_agent.protocol import (
     ToolResultMessage,
 )
 from coding_agent.runtime import RunState
-from coding_agent.shell import ShellContent
 
 
 _API_KEY = os.getenv("CODING_AGENT_TEST_API_KEY")
@@ -144,6 +144,13 @@ def test_real_model_completes_inspect_edit_verify_workflow(tmp_path: Path) -> No
     assert "read_file" in tool_names
     assert "edit_file" in tool_names
     assert "shell" in tool_names
+    assert any(
+        call.name == "shell"
+        and isinstance(call.raw_arguments, Mapping)
+        and call.raw_arguments.get("command") == verification_command
+        for response in recording_client.responses
+        for call in response.tool_calls
+    )
 
     results = [
         result
@@ -157,10 +164,9 @@ def test_real_model_completes_inspect_edit_verify_workflow(tmp_path: Path) -> No
     assert any(result.outcome is ToolOutcome.SUCCESS for result in edit_results)
     assert any(
         result.outcome is ToolOutcome.SUCCESS
-        and isinstance(result.content, ShellContent)
-        and result.content.command == verification_command
-        and result.content.exit_code == 0
-        and "OK" in result.content.stderr
+        and isinstance(result.content, Mapping)
+        and result.content.get("exit_code") == 0
+        and "OK" in str(result.content.get("stderr", ""))
         for result in shell_results
     ), [
         (result.outcome, repr(result.content), result.error)
@@ -258,8 +264,8 @@ def test_real_model_solves_natural_language_bug_report(tmp_path: Path) -> None:
     assert any(
         result.tool_name == "shell"
         and result.outcome is ToolOutcome.SUCCESS
-        and isinstance(result.content, ShellContent)
-        and result.content.exit_code == 0
+        and isinstance(result.content, Mapping)
+        and result.content.get("exit_code") == 0
         for result in results
     )
     for call in tool_calls:

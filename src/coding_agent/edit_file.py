@@ -169,7 +169,11 @@ class EditFileTool(Tool[EditFileArguments]):
                 arguments.path,
             )
 
-        actual_count = original_text.count(arguments.old_text)
+        line_ending = _consistent_line_ending(original_text)
+        old_text = _adapt_line_endings(arguments.old_text, line_ending)
+        new_text = _adapt_line_endings(arguments.new_text, line_ending)
+
+        actual_count = original_text.count(old_text)
         if actual_count == 0:
             return self._failure(
                 "EDIT_TARGET_NOT_FOUND",
@@ -192,8 +196,8 @@ class EditFileTool(Tool[EditFileArguments]):
             )
 
         updated_bytes = original_text.replace(
-            arguments.old_text,
-            arguments.new_text,
+            old_text,
+            new_text,
         ).encode("utf-8")
         write_error = self._replace_with_temporary_sibling(
             resolved.resolved_path,
@@ -278,3 +282,28 @@ class EditFileTool(Tool[EditFileArguments]):
 
 
 __all__ = ["EditFileArguments", "EditFileContent", "EditFileTool"]
+
+
+def _consistent_line_ending(text: str) -> str | None:
+    """Return one file-wide newline style, or None for mixed/no newlines."""
+
+    without_crlf = text.replace("\r\n", "")
+    styles = {
+        style
+        for style, present in (
+            ("\r\n", "\r\n" in text),
+            ("\n", "\n" in without_crlf),
+            ("\r", "\r" in without_crlf),
+        )
+        if present
+    }
+    return next(iter(styles)) if len(styles) == 1 else None
+
+
+def _adapt_line_endings(value: str, line_ending: str | None) -> str:
+    """Adapt model-observed newlines to a consistent target without touching it."""
+
+    if line_ending is None or not any(marker in value for marker in ("\r", "\n")):
+        return value
+    normalized = value.replace("\r\n", "\n").replace("\r", "\n")
+    return normalized.replace("\n", line_ending)

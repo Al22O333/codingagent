@@ -139,6 +139,24 @@ def test_crlf_and_mixed_line_endings_are_preserved(tmp_path: Path) -> None:
     assert target.read_bytes() == b"first\r\nnew value\r\nthird\nfourth\r\n"
 
 
+def test_lf_observation_can_edit_consistent_crlf_file(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "main.py"
+    target.write_bytes(b"def value():\r\n    return 1\r\n")
+    tool = EditFileTool(WorkspacePathResolver(workspace))
+    arguments = EditFileArguments(
+        path="main.py",
+        old_text="def value():\n    return 1",
+        new_text="def value():\n    return 2",
+    )
+
+    result = tool.execute(_prepare(tool, arguments))
+
+    assert result.outcome is ToolOutcome.SUCCESS
+    assert target.read_bytes() == b"def value():\r\n    return 2\r\n"
+
+
 def test_write_failure_preserves_original_and_removes_temporary_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
