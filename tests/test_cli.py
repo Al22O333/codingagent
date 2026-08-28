@@ -25,7 +25,7 @@ from coding_agent.interaction import (
 from coding_agent.model_client import FakeModelClient
 from coding_agent.model_client import FatalProviderError
 from coding_agent.protocol import ModelRequest, ModelResponse, ModelUsage, ToolCall, ToolOutcome
-from coding_agent.runtime import RunState
+from coding_agent.runtime import RunState, RuntimeEvent
 
 
 def _config(workspace: Path) -> CLIConfig:
@@ -304,8 +304,8 @@ def test_console_clarification_answer_and_eof() -> None:
     assert answered.status is ClarificationStatus.ANSWERED
     assert answered.answer == "src/main.py"
     assert cancelled.status is ClarificationStatus.CANCELLED
-    assert "Agent needs clarification:" in answered_output.getvalue()
-    assert "Permission required" not in answered_output.getvalue()
+    assert "需要你补充信息：" in answered_output.getvalue()
+    assert "需要确认" not in answered_output.getvalue()
 
 
 def test_console_permission_and_clarification_prompts_are_distinct() -> None:
@@ -316,9 +316,32 @@ def test_console_permission_and_clarification_prompts_are_distinct() -> None:
     )
 
     assert decision is ConfirmationDecision.REJECT
-    assert "Permission required:" in permission_output.getvalue()
-    assert "exact action" in permission_output.getvalue()
-    assert "Agent needs clarification" not in permission_output.getvalue()
+    assert "⚠ 需要确认" in permission_output.getvalue()
+    assert "仅授权下面这一次精确操作" in permission_output.getvalue()
+    assert "需要你补充信息" not in permission_output.getvalue()
+
+
+def test_console_permission_command_keeps_head_and_risky_tail_without_tool_repr() -> None:
+    output = StringIO()
+    command = "python " + "x" * 400 + " && git push origin main"
+    interaction = ConsoleUserInteraction(StringIO("n\n"), output)
+
+    interaction.confirm(
+        ConfirmationRequest(
+            "call",
+            "shell",
+            command,
+            "AMBIGUOUS_COMPLEX_SHELL",
+            "risk",
+        )
+    )
+
+    rendered = output.getvalue()
+    assert rendered.count("⚠ 需要确认") == 1
+    assert "python" in rendered
+    assert "git push origin main" in rendered
+    assert "中间已省略" in rendered
+    assert "ShellTool(" not in rendered
 
 
 def test_console_clarification_io_error_is_not_treated_as_cancellation() -> None:
@@ -352,9 +375,10 @@ def test_one_shot_main_starts_runtime_and_prints_final(
     output = capsys.readouterr().out
     assert exit_code == 0
     assert cli.STARTUP_MESSAGE in output
-    assert f"Workspace: {tmp_path.resolve()}" in output
-    assert "Model: test-model" in output
-    assert "Agent: running" in output
+    assert f"工作区  {tmp_path.resolve()}" in output
+    assert "模型    test-model" in output
+    assert "正在运行…" in output
+    assert "◆ 运行结束" in output
     assert "Finished from CLI." in output
     assert fake.requests[0].messages[1].text == "inspect the project"  # type: ignore[union-attr]
 
@@ -378,7 +402,7 @@ def test_invalid_workspace_fails_startup_before_model_client_construction(
 
     assert exit_code == 2
     assert constructed is False
-    assert "Startup error:" in capsys.readouterr().err
+    assert "启动失败：" in capsys.readouterr().err
 
 
 def test_cli_shows_sanitized_tool_activity_without_arguments_or_secrets(
@@ -416,9 +440,25 @@ def test_cli_shows_sanitized_tool_activity_without_arguments_or_secrets(
     cli._run_task(runtime, "Inspect the project", output)
 
     rendered = output.getvalue()
-    assert "[edit] src/main.py" in rendered
+    assert "● 修改文件 src/main.py" in rendered
     assert secret not in rendered
     assert "replacement" not in rendered
+
+
+def test_normal_tool_activity_hides_internal_requested_placeholder() -> None:
+    lines = cli._render_event(
+        RuntimeEvent(
+            "tool_proposed",
+            {
+                "call_id": "search",
+                "tool_name": "search_files",
+                "action": "requested",
+            },
+        ),
+        debug=False,
+    )
+
+    assert lines == ("● 查找文件",)
 
 
 def test_normal_hides_usage_while_debug_shows_only_normalized_usage(
@@ -477,10 +517,129 @@ def test_shell_rendering_is_bounded_and_redacts_runtime_credential(
     cli._run_task(runtime, "Run the check", output)
 
     rendered = output.getvalue()
-    assert "[shell]" in rendered
+    assert "● 执行本地命令" in rendered
     assert secret not in rendered
-    assert "<redacted>" in rendered
+    assert command not in rendered
     assert len(rendered) < 5_000
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("pytest -q", "test"),
+        ("python -m pytest -q", "test"),
+        ("ruff check src", "check"),
+        ("cargo build", "build"),
+        ("npm run build", "build"),
+        ("my-pytest-wrapper", None),
+        ("echo pytest", None),
+        ("pytest -q && git push origin main", None),
+        ("python -c \"print('pytest')\"", None),
+    ],
+)
+def test_shell_presentation_classification_is_conservative(
+    command: str,
+    expected: str | None,
+) -> None:
+    assert cli._classify_shell_presentation(command) == expected
+
+
+def test_normal_shell_success_uses_summary_or_bounded_useful_excerpt() -> None:
+    test_lines = cli._render_event(
+        RuntimeEvent(
+            "tool_result",
+            {"call_id": "test", "outcome": "SUCCESS", "diagnostic": "8 passed"},
+        ),
+        debug=False,
+        proposed_actions={"test": ("shell", "pytest -q")},
+    )
+    unknown_lines = cli._render_event(
+        RuntimeEvent(
+            "tool_result",
+            {
+                "call_id": "status",
+                "outcome": "SUCCESS",
+                "diagnostic": "first\nsecond\nthird\nfourth",
+            },
+        ),
+        debug=False,
+        proposed_actions={"status": ("shell", "git status --short")},
+    )
+
+    assert test_lines == ("  ✓ 8 个测试全部通过",)
+    assert unknown_lines == (
+        "  ✓ 命令执行成功",
+        "    first",
+        "    second",
+        "    third",
+    )
+
+
+def test_permission_resolution_does_not_render_a_second_confirmation_prompt() -> None:
+    lines = cli._render_event(
+        RuntimeEvent(
+            "permission_resolved",
+            {"call_id": "call", "decision": "APPROVE"},
+        ),
+        debug=False,
+    )
+
+    rendered = "\n".join(lines)
+    assert "已批准，仅限本次操作" in rendered
+    assert "需要确认" not in rendered
+    assert "允许执行" not in rendered
+
+
+def test_composed_console_permission_has_one_prompt_and_one_resolution(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
+    output = StringIO()
+    client = FakeModelClient(
+        [
+            ModelResponse(
+                text=None,
+                tool_calls=(ToolCall("secret", "read_file", {"path": ".env"}),),
+            ),
+            ModelResponse(text="Inspected."),
+        ]
+    )
+    runtime = build_runtime(
+        _config(tmp_path),
+        model_client=client,
+        stdin=StringIO("y\n"),
+        stdout=output,
+    )
+
+    cli._run_task(runtime, "Inspect .env", output)
+
+    rendered = output.getvalue()
+    assert rendered.count("⚠ 需要确认") == 1
+    assert rendered.count("允许执行？") == 1
+    assert rendered.count("已批准，仅限本次操作") == 1
+    assert "ReadFileTool(" not in rendered
+
+
+def test_failed_shell_diagnostic_prefers_error_lines_and_stays_bounded() -> None:
+    diagnostic = "intro\n" + "x" * 1_500 + "\nerror: compilation failed\ntrailer"
+    lines = cli._render_event(
+        RuntimeEvent(
+            "tool_result",
+            {
+                "call_id": "build",
+                "outcome": "UNSUCCESSFUL_COMMAND",
+                "exit_code": 1,
+                "diagnostic": diagnostic,
+            },
+        ),
+        debug=False,
+        proposed_actions={"build": ("shell", "custom-build")},
+    )
+
+    rendered = "\n".join(lines)
+    assert "error: compilation failed" in rendered
+    assert "x" * 1_000 not in rendered
+    assert len(rendered) < 1_000
 
 
 def test_cli_provider_failure_is_understandable_and_does_not_leak_secret(
@@ -499,7 +658,7 @@ def test_cli_provider_failure_is_understandable_and_does_not_leak_secret(
 
     captured = capsys.readouterr()
     assert exit_code == 1
-    assert "Provider error:" in captured.out
+    assert "模型服务请求失败" in captured.out
     assert secret not in captured.out
     assert secret not in captured.err
     assert "Traceback" not in captured.out
@@ -530,7 +689,7 @@ def test_interactive_session_reprompts_after_empty_failed_and_completed_runs(
     output = capsys.readouterr().out
     assert exit_code == 0
     assert len(fake.requests) == 2
-    assert "Provider error:" in output
+    assert "模型服务请求失败" in output
     assert "Recovered final." in output
     assert "Task succeeded" not in output
 
@@ -561,7 +720,7 @@ def test_interactive_active_run_cancellation_returns_to_prompt(
     output = capsys.readouterr().out
     assert exit_code == 0
     assert len(fake.requests) == 2
-    assert "Run cancelled." in output
+    assert "已取消本次运行" in output
     assert "Second final." in output
 
 

@@ -143,9 +143,7 @@ def test_approve_executes_exact_pending_action_and_cleans_state(tmp_path: Path) 
     assert run.pending_action is None
     assert run.pending_user_request is None
     assert run.wait_reason is None
-    assert interaction.requests[0].action_summary == (
-        "read_file(end_line=None, path='.env', start_line=1)"
-    )
+    assert interaction.requests[0].action_summary == ".env"
 
 
 def test_approved_confirmation_ends_old_batch(tmp_path: Path) -> None:

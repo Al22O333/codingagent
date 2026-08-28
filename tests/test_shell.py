@@ -11,7 +11,13 @@ from pathlib import Path
 import pytest
 
 from coding_agent.protocol import ToolError, ToolOutcome
-from coding_agent.shell import ShellArguments, ShellBackend, ShellContent, ShellTool
+from coding_agent.shell import (
+    ShellArguments,
+    ShellBackend,
+    ShellContent,
+    ShellTool,
+    _decode_shell_output,
+)
 from coding_agent.tooling import PreparedToolCall
 from coding_agent.workspace import WorkspacePathResolver
 
@@ -97,6 +103,35 @@ def test_nonzero_exit_is_unsuccessful_command_with_stderr(tmp_path: Path) -> Non
     assert isinstance(result.content, ShellContent)
     assert result.content.exit_code == 7
     assert "failure" in result.content.stderr
+
+
+def test_shell_output_decode_falls_back_after_invalid_utf8() -> None:
+    message = "此时不应有 <<。"
+
+    decoded = _decode_shell_output(
+        message.encode("gbk"),
+        ("utf-8", "gbk"),
+    )
+
+    assert decoded == message
+    assert "\ufffd" not in decoded
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows cmd encoding regression")
+def test_windows_cmd_native_error_is_not_mojibake(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    result = _execute(
+        _tool(workspace),
+        ShellArguments(command="python - <<'EOF'"),
+    )
+
+    assert result.outcome is ToolOutcome.UNSUCCESSFUL_COMMAND
+    assert isinstance(result.content, ShellContent)
+    diagnostic = result.content.stderr or result.content.stdout
+    assert "\ufffd" not in diagnostic
+    assert "<<" in diagnostic
 
 
 def test_timeout_is_operation_failure_and_captures_partial_output(

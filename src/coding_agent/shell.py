@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import locale
 import os
 import re
 import signal
@@ -358,7 +360,40 @@ class _BoundedStreamCapture:
 
     def text(self) -> str:
         retained = bytes(self._head + self._tail)
-        return retained.decode("utf-8", errors="replace")
+        return _decode_shell_output(retained)
+
+
+def _decode_shell_output(
+    data: bytes,
+    encodings: tuple[str, ...] | None = None,
+) -> str:
+    """Prefer UTF-8, then the host Shell's native output encoding on Windows."""
+
+    candidates = encodings or _shell_output_encodings()
+    attempted: set[str] = set()
+    for encoding in candidates:
+        normalized = encoding.casefold()
+        if normalized in attempted:
+            continue
+        attempted.add(normalized)
+        try:
+            return data.decode(encoding, errors="strict")
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
+def _shell_output_encodings() -> tuple[str, ...]:
+    candidates = ["utf-8"]
+    if os.name == "nt":
+        try:
+            code_page = int(ctypes.windll.kernel32.GetConsoleOutputCP())  # type: ignore[attr-defined]
+        except (AttributeError, OSError, TypeError, ValueError):
+            code_page = 0
+        if code_page:
+            candidates.append(f"cp{code_page}")
+    candidates.append(locale.getpreferredencoding(False))
+    return tuple(candidates)
 
 
 if os.name == "nt":

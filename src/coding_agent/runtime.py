@@ -1030,6 +1030,16 @@ class AgentRuntime:
 
     def _action_summary(self, prepared: PreparedToolCall) -> str:
         arguments = prepared.validated_arguments.model_dump(mode="json")
+        if prepared.tool_identity.name == "shell":
+            command = arguments.get("command")
+            return (
+                self._redact_runtime_secrets(command)[:1_000]
+                if isinstance(command, str)
+                else "local shell command"
+            )
+        path = arguments.get("path")
+        if isinstance(path, str):
+            return path.replace("\r", " ").replace("\n", " ")[:1_000]
         parts: list[str] = []
         for key, value in sorted(arguments.items()):
             if key in {"content", "old_text", "new_text"} and isinstance(value, str):
