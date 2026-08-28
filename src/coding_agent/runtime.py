@@ -1028,13 +1028,17 @@ class AgentRuntime:
             ends_batch = result.outcome is not ToolOutcome.SUCCESS
         return _ToolDispatchResult(result=result, ends_batch=ends_batch)
 
-    @staticmethod
-    def _action_summary(prepared: PreparedToolCall) -> str:
+    def _action_summary(self, prepared: PreparedToolCall) -> str:
         arguments = prepared.validated_arguments.model_dump(mode="json")
-        rendered = ", ".join(
-            f"{key}={value!r}" for key, value in sorted(arguments.items())
-        )
-        return f"{prepared.tool_identity.name}({rendered})"
+        parts: list[str] = []
+        for key, value in sorted(arguments.items()):
+            if key in {"content", "old_text", "new_text"} and isinstance(value, str):
+                rendered_value = f"<omitted, {len(value)} chars>"
+            else:
+                rendered_value = self._redact_runtime_secrets(repr(value))[:400]
+            parts.append(f"{key}={rendered_value}")
+        rendered = ", ".join(parts)
+        return f"{prepared.tool_identity.name}({rendered})"[:1_000]
 
     @staticmethod
     def _operation_failure(

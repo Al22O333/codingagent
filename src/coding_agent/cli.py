@@ -85,7 +85,9 @@ class ConsoleUserInteraction:
 
     def ask(self, request: ClarificationRequest) -> ClarificationResponse:
         try:
-            self._stdout.write(f"{request.question}\n> ")
+            self._stdout.write(
+                f"Agent needs clarification:\n{request.question}\n> "
+            )
             self._stdout.flush()
             answer = self._stdin.readline()
         except OSError as error:
@@ -244,6 +246,14 @@ def _render_event(event: RuntimeEvent, *, debug: bool) -> tuple[str, ...]:
         lines.append("[context] older working history was trimmed")
     elif event.kind == "budget_exhausted":
         lines.append(f"Run stopped: {event.facts.get('limit')} reached.")
+    elif event.kind == "permission_resolved":
+        decision = event.facts.get("decision")
+        if decision == "APPROVE":
+            lines.append("✓ approved once")
+        elif decision == "REJECT":
+            lines.append("✗ rejected")
+        else:
+            lines.append("Permission cancelled.")
 
     if debug:
         safe_facts = " ".join(
@@ -326,11 +336,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (EOFError, KeyboardInterrupt):
             print()
             return 0
-        if not task.strip():
+        task = task.strip()
+        if not task:
+            continue
+        if task.casefold() in {"/exit", "/quit"}:
             return 0
-        exit_code = _run_task(runtime, task, sys.stdout)
-        if exit_code == 130:
-            return exit_code
+        _run_task(runtime, task, sys.stdout)
 
 
 def _run_task(runtime: AgentRuntime, task: str, stdout: TextIO) -> int:

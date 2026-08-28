@@ -6,6 +6,7 @@ import os
 import shlex
 import subprocess
 import sys
+import builtins
 from io import StringIO
 from pathlib import Path
 
@@ -23,7 +24,7 @@ from coding_agent.interaction import (
 )
 from coding_agent.model_client import FakeModelClient
 from coding_agent.model_client import FatalProviderError
-from coding_agent.protocol import ModelResponse, ModelUsage, ToolCall, ToolOutcome
+from coding_agent.protocol import ModelRequest, ModelResponse, ModelUsage, ToolCall, ToolOutcome
 from coding_agent.runtime import RunState
 
 
@@ -275,6 +276,7 @@ def test_composition_filters_runtime_secrets_but_preserves_ordinary_environment(
     [
         ("y\n", ConfirmationDecision.APPROVE),
         ("n\n", ConfirmationDecision.REJECT),
+        ("\n", ConfirmationDecision.REJECT),
         ("c\n", ConfirmationDecision.CANCEL),
         ("", ConfirmationDecision.CANCEL),
     ],
@@ -289,7 +291,8 @@ def test_console_permission_decisions(
 
 
 def test_console_clarification_answer_and_eof() -> None:
-    answered = ConsoleUserInteraction(StringIO("src/main.py\n"), StringIO()).ask(
+    answered_output = StringIO()
+    answered = ConsoleUserInteraction(StringIO("src/main.py\n"), answered_output).ask(
         ClarificationRequest("ask", "Which file?")
     )
     cancelled = ConsoleUserInteraction(StringIO(""), StringIO()).ask(
@@ -298,6 +301,21 @@ def test_console_clarification_answer_and_eof() -> None:
     assert answered.status is ClarificationStatus.ANSWERED
     assert answered.answer == "src/main.py"
     assert cancelled.status is ClarificationStatus.CANCELLED
+    assert "Agent needs clarification:" in answered_output.getvalue()
+    assert "Permission required" not in answered_output.getvalue()
+
+
+def test_console_permission_and_clarification_prompts_are_distinct() -> None:
+    permission_output = StringIO()
+    interaction = ConsoleUserInteraction(StringIO("\n"), permission_output)
+    decision = interaction.confirm(
+        ConfirmationRequest("call", "shell", "shell command", "RISK", "risk")
+    )
+
+    assert decision is ConfirmationDecision.REJECT
+    assert "Permission required:" in permission_output.getvalue()
+    assert "exact action" in permission_output.getvalue()
+    assert "Agent needs clarification" not in permission_output.getvalue()
 
 
 def test_console_clarification_io_error_is_not_treated_as_cancellation() -> None:
@@ -461,3 +479,96 @@ def test_cli_provider_failure_is_understandable_and_does_not_leak_secret(
     assert secret not in captured.err
     assert "Traceback" not in captured.out
     assert "Traceback" not in captured.err
+
+
+def _configure_main_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODING_AGENT_MODEL", "test-model")
+    monkeypatch.setenv("CODING_AGENT_API_KEY", "test-key")
+    monkeypatch.setenv("CODING_AGENT_BASE_URL", "https://provider.invalid/v1")
+
+
+def test_interactive_session_reprompts_after_empty_failed_and_completed_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _configure_main_environment(monkeypatch)
+    fake = FakeModelClient(
+        [FatalProviderError("temporary failure"), ModelResponse("Recovered final.")]
+    )
+    monkeypatch.setattr(cli, "OpenAICompatibleModelClient", lambda config: fake)
+    answers = iter(["   ", "first task", "second task", "/exit"])
+    monkeypatch.setattr(builtins, "input", lambda prompt="": next(answers))
+
+    exit_code = cli.main(["--workspace", str(tmp_path)])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert len(fake.requests) == 2
+    assert "Provider error:" in output
+    assert "Recovered final." in output
+    assert "Task succeeded" not in output
+
+
+def test_interactive_active_run_cancellation_returns_to_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _configure_main_environment(monkeypatch)
+    class InterruptThenRespondClient:
+        def __init__(self) -> None:
+            self.requests: list[ModelRequest] = []
+
+        def complete(self, request: ModelRequest) -> ModelResponse:
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                raise KeyboardInterrupt
+            return ModelResponse("Second final.")
+
+    fake = InterruptThenRespondClient()
+    monkeypatch.setattr(cli, "OpenAICompatibleModelClient", lambda config: fake)
+    answers = iter(["cancel this run", "continue", "/quit"])
+    monkeypatch.setattr(builtins, "input", lambda prompt="": next(answers))
+
+    exit_code = cli.main(["--workspace", str(tmp_path)])
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert len(fake.requests) == 2
+    assert "Run cancelled." in output
+    assert "Second final." in output
+
+
+@pytest.mark.parametrize("terminal_signal", [EOFError(), KeyboardInterrupt()])
+def test_interactive_top_level_eof_or_interrupt_exits_without_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_signal: BaseException,
+) -> None:
+    _configure_main_environment(monkeypatch)
+    fake = FakeModelClient([ModelResponse("unused")])
+    monkeypatch.setattr(cli, "OpenAICompatibleModelClient", lambda config: fake)
+
+    def stop(prompt: str = "") -> str:
+        raise terminal_signal
+
+    monkeypatch.setattr(builtins, "input", stop)
+
+    assert cli.main(["--workspace", str(tmp_path)]) == 0
+    assert fake.requests == ()
+
+
+@pytest.mark.parametrize("command", ["/exit", "/QUIT"])
+def test_interactive_exit_commands_do_not_start_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    _configure_main_environment(monkeypatch)
+    fake = FakeModelClient([ModelResponse("unused")])
+    monkeypatch.setattr(cli, "OpenAICompatibleModelClient", lambda config: fake)
+    monkeypatch.setattr(builtins, "input", lambda prompt="": command)
+
+    assert cli.main(["--workspace", str(tmp_path)]) == 0
+    assert fake.requests == ()
