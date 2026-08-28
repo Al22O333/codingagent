@@ -26,9 +26,14 @@ from .interaction import (
 from .model_client import ModelClient
 from .openai_client import OpenAICompatibleConfig, OpenAICompatibleModelClient
 from .policy import PolicyEngine
-from .protocol import ToolCall
 from .read_file import ReadFileTool
-from .runtime import AgentRuntime, RunState, RuntimeLimits, TerminationReason
+from .runtime import (
+    AgentRuntime,
+    RuntimeEvent,
+    RunState,
+    RuntimeLimits,
+    TerminationReason,
+)
 from .search_text import SearchTextTool
 from .shell import ShellBackend, ShellTool
 from .tooling import ToolRegistry
@@ -165,7 +170,7 @@ def build_runtime(
         stdin or sys.stdin,
         stdout or sys.stdout,
     )
-    tool_activity = _tool_activity_writer(stdout) if stdout is not None else None
+    observer = _event_writer(stdout) if stdout is not None else None
     return AgentRuntime(
         concrete_model_client,
         ContextManager(max_context_chars=config.max_context_chars),
@@ -180,34 +185,23 @@ def build_runtime(
         workspace_resolver=resolver,
         policy_engine=PolicyEngine(),
         user_interaction=concrete_interaction,
-        tool_activity=tool_activity,
+        observer=observer,
     )
 
 
-def _tool_activity_writer(stdout: TextIO) -> Callable[[ToolCall], None]:
-    def report(tool_call: ToolCall) -> None:
+def _event_writer(stdout: TextIO) -> Callable[[RuntimeEvent], None]:
+    def report(event: RuntimeEvent) -> None:
+        if event.kind != "tool_proposed":
+            return
         try:
             stdout.write(
-                f"[tool] {tool_call.name}: {_tool_action_summary(tool_call)}\n"
+                f"[tool] {event.facts['tool_name']}: {event.facts['action']}\n"
             )
             stdout.flush()
         except OSError as error:
             raise UserInteractionError("terminal activity output failed") from error
 
     return report
-
-
-def _tool_action_summary(tool_call: ToolCall) -> str:
-    arguments = tool_call.raw_arguments
-    if not isinstance(arguments, Mapping):
-        return "requested"
-    if tool_call.name == "shell":
-        cwd = arguments.get("cwd")
-        return f"command in {cwd}" if isinstance(cwd, str) else "command"
-    path = arguments.get("path")
-    if isinstance(path, str):
-        return path.replace("\r", " ").replace("\n", " ")[:200]
-    return "requested"
 
 
 def _parser() -> argparse.ArgumentParser:

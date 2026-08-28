@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from math import isfinite
 from time import monotonic, sleep
+from types import MappingProxyType
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -83,6 +84,25 @@ class WaitReason(StrEnum):
 
     PERMISSION_CONFIRMATION = "PERMISSION_CONFIRMATION"
     CLARIFICATION = "CLARIFICATION"
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeEvent:
+    """One small normalized observability fact with no control authority."""
+
+    kind: str
+    facts: Mapping[str, str | int | float | bool | None] = field(
+        default_factory=dict
+    )
+
+    def __post_init__(self) -> None:
+        bounded: dict[str, str | int | float | bool | None] = {}
+        for raw_key, raw_value in list(self.facts.items())[:20]:
+            key = str(raw_key)[:80]
+            value = raw_value[:200] if isinstance(raw_value, str) else raw_value
+            bounded[key] = value
+        object.__setattr__(self, "kind", self.kind[:80])
+        object.__setattr__(self, "facts", MappingProxyType(bounded))
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,7 +201,7 @@ class AgentRuntime:
         sleep_fn: Callable[[float], None] = sleep,
         transport_retry_base_delay_seconds: float = 0.5,
         transport_retry_max_delay_seconds: float = 2.0,
-        tool_activity: Callable[[ToolCall], None] | None = None,
+        observer: Callable[[RuntimeEvent], object] | None = None,
     ) -> None:
         if (
             not isfinite(transport_retry_base_delay_seconds)
@@ -208,7 +228,7 @@ class AgentRuntime:
             transport_retry_base_delay_seconds
         )
         self._transport_retry_max_delay_seconds = transport_retry_max_delay_seconds
-        self._tool_activity = tool_activity
+        self._observer = observer
         self.session = Session()
 
     def run(self, task: str) -> AgentRun:
@@ -217,6 +237,7 @@ class AgentRuntime:
         run_started_at = self._clock()
         try:
             self.session._add_run(agent_run)
+            self._emit("run_started", run_id=agent_run.run_id)
             return self._run_until_terminal(agent_run, task, run_started_at)
         except KeyboardInterrupt:
             self._terminate_run(
@@ -251,6 +272,16 @@ class AgentRuntime:
                 self._context_manager.end_run(
                     completed=agent_run.state is RunState.COMPLETED
                 )
+                self._emit(
+                    "run_terminal",
+                    run_id=agent_run.run_id,
+                    state=agent_run.state.value,
+                    reason=(
+                        agent_run.termination_reason.value
+                        if agent_run.termination_reason is not None
+                        else None
+                    ),
+                )
         return agent_run
 
     def _run_until_terminal(
@@ -268,6 +299,7 @@ class AgentRuntime:
             if self._model_budget_exhausted(agent_run, run_started_at):
                 return agent_run
 
+            was_incomplete = self._context_manager.history_incomplete
             messages = self._context_manager.build_model_messages(
                 corrective_instruction=(
                     corrective_feedback.text
@@ -275,6 +307,8 @@ class AgentRuntime:
                     else None
                 )
             )
+            if not was_incomplete and self._context_manager.history_incomplete:
+                self._emit("context_truncated", history_incomplete=True)
             request = ModelRequest(
                 messages=messages,
                 tools=self._tool_registry.specs(),
@@ -294,6 +328,10 @@ class AgentRuntime:
                 ):
                     return agent_run
                 corrective_feedback = self._corrective_feedback()
+                self._emit(
+                    "protocol_corrective",
+                    consecutive_errors=agent_run.consecutive_protocol_errors,
+                )
                 continue
 
             if response is None:
@@ -308,6 +346,10 @@ class AgentRuntime:
                 ):
                     return agent_run
                 corrective_feedback = self._corrective_feedback()
+                self._emit(
+                    "protocol_corrective",
+                    consecutive_errors=agent_run.consecutive_protocol_errors,
+                )
                 continue
 
             agent_run.consecutive_protocol_errors = 0
@@ -372,18 +414,27 @@ class AgentRuntime:
 
         for tool_call in tool_calls:
             if batch_stopped:
-                results.append(self._not_executed(tool_call))
+                result = self._not_executed(tool_call)
+                results.append(result)
+                self._emit_tool_result(result)
                 continue
 
             if self._tool_budget_exhausted(agent_run, run_started_at):
-                results.append(self._not_executed(tool_call))
+                result = self._not_executed(tool_call)
+                results.append(result)
+                self._emit_tool_result(result)
                 batch_stopped = True
                 continue
 
-            if self._tool_activity is not None:
-                self._tool_activity(tool_call)
+            self._emit(
+                "tool_proposed",
+                call_id=tool_call.call_id,
+                tool_name=tool_call.name,
+                action=self._tool_observation_summary(tool_call),
+            )
             dispatch = self._dispatch_tool_call(tool_call, agent_run)
             results.append(dispatch.result)
+            self._emit_tool_result(dispatch.result)
             if dispatch.ends_batch:
                 batch_stopped = True
 
@@ -408,7 +459,13 @@ class AgentRuntime:
                     agent_run.termination_reason = TerminationReason.PROVIDER_FAILURE
                     self._refresh_active_duration(agent_run, run_started_at)
                     return None
-                self._sleep(self._transport_retry_delay(retries))
+                delay = self._transport_retry_delay(retries)
+                self._emit(
+                    "provider_retry",
+                    retry_number=retries + 1,
+                    delay_seconds=delay,
+                )
+                self._sleep(delay)
                 retries += 1
                 continue
             except FatalProviderError as error:
@@ -479,6 +536,7 @@ class AgentRuntime:
         agent_run.state = RunState.FAILED
         agent_run.termination_reason = TerminationReason.LIMIT_REACHED
         agent_run.limit_reached = limit_name
+        self._emit("budget_exhausted", limit=limit_name)
         self._refresh_active_duration(agent_run, run_started_at)
 
     def _refresh_active_duration(
@@ -652,6 +710,13 @@ class AgentRuntime:
             prepared,
             agent_run.explicit_task_constraints,
         )
+        self._emit(
+            "policy_outcome",
+            policy="explicit_constraint",
+            decision=constraint_result.decision.value,
+            reason_code=constraint_result.reason_code,
+            tool_name=tool_call.name,
+        )
         if constraint_result.decision is ConstraintDecision.REJECT:
             return self._dispatch_result(ToolResult(
                 call_id=tool_call.call_id,
@@ -665,6 +730,13 @@ class AgentRuntime:
             ))
 
         permission_result = self._policy_engine.check_risk_permission(prepared)
+        self._emit(
+            "policy_outcome",
+            policy="risk_permission",
+            decision=permission_result.decision.value,
+            reason_code=permission_result.reason_code,
+            tool_name=tool_call.name,
+        )
         if permission_result.decision is PermissionDecision.DENY:
             return self._dispatch_result(ToolResult(
                 call_id=tool_call.call_id,
@@ -765,6 +837,12 @@ class AgentRuntime:
         agent_run.pending_user_request = request
         agent_run.wait_reason = WaitReason.PERMISSION_CONFIRMATION
         agent_run.state = RunState.WAITING_FOR_USER
+        self._emit(
+            "permission_requested",
+            call_id=prepared.call_id,
+            tool_name=prepared.tool_identity.name,
+            reason_code=request.reason_code,
+        )
         wait_started_at = self._clock()
 
         try:
@@ -777,6 +855,11 @@ class AgentRuntime:
             )
 
         try:
+            self._emit(
+                "permission_resolved",
+                call_id=prepared.call_id,
+                decision=decision.value,
+            )
             if decision is ConfirmationDecision.APPROVE:
                 agent_run.state = RunState.RUNNING
                 return self._execute_prepared(tool, pending.prepared_call, ends_batch=True)
@@ -846,6 +929,41 @@ class AgentRuntime:
             content=execution.content,
             error=execution.error,
         ), ends_batch=ends_batch)
+
+    def _emit_tool_result(self, result: ToolResult) -> None:
+        self._emit(
+            "tool_result",
+            call_id=result.call_id,
+            tool_name=result.tool_name,
+            outcome=result.outcome.value,
+            error_code=result.error.code if result.error is not None else None,
+        )
+
+    def _emit(
+        self,
+        kind: str,
+        **facts: str | int | float | bool | None,
+    ) -> None:
+        """Notify a read-only observer without granting control authority."""
+        if self._observer is None:
+            return
+        try:
+            self._observer(RuntimeEvent(kind, facts))
+        except Exception:
+            pass
+
+    @staticmethod
+    def _tool_observation_summary(tool_call: ToolCall) -> str:
+        arguments = tool_call.raw_arguments
+        if not isinstance(arguments, Mapping):
+            return "requested"
+        if tool_call.name == "shell":
+            cwd = arguments.get("cwd")
+            return f"command in {cwd}" if isinstance(cwd, str) else "command"
+        path = arguments.get("path")
+        if isinstance(path, str):
+            return path.replace("\r", " ").replace("\n", " ")[:200]
+        return "requested"
 
     @staticmethod
     def _dispatch_result(
@@ -921,6 +1039,7 @@ __all__ = [
     "AgentRuntime",
     "ModelProtocolError",
     "RuntimeLimits",
+    "RuntimeEvent",
     "RunState",
     "PendingAction",
     "Session",
