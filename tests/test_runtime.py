@@ -206,6 +206,35 @@ def test_context_limit_failure_is_a_controlled_runtime_failure() -> None:
     assert client.requests == ()
 
 
+def test_context_overflow_after_response_fails_without_sending_next_turn() -> None:
+    oversized_call = ToolCall(
+        "oversized",
+        "missing_tool",
+        {"payload": "x" * 10_000},
+    )
+    client = FakeModelClient(
+        [
+            ModelResponse(text=None, tool_calls=(oversized_call,)),
+            ModelResponse(text="must remain unused"),
+        ]
+    )
+    runtime = AgentRuntime(
+        client,
+        ContextManager(max_context_chars=8_000),
+        ToolRegistry(),
+        TEST_LIMITS,
+        policy_engine=PolicyEngine(),
+        user_interaction=FakeUserInteraction(),
+    )
+
+    run = runtime.run("Inspect the project")
+
+    assert run.state is RunState.FAILED
+    assert run.termination_reason is TerminationReason.RUNTIME_FAILURE
+    assert isinstance(run.last_error, ContextLimitError)
+    assert len(client.requests) == 1
+
+
 def test_keyboard_interrupt_cancels_run_without_consuming_model_turn() -> None:
     class InterruptingModelClient:
         def complete(self, request: ModelRequest) -> ModelResponse:

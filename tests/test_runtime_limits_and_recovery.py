@@ -206,6 +206,8 @@ def test_invalid_response_consumes_turn_and_corrective_response_consumes_another
     assert run.state is RunState.COMPLETED
     assert run.model_turns == 2
     assert run.consecutive_protocol_errors == 0
+    assert client.requests[0] is not client.requests[1]
+    assert "previous response was invalid" not in client.requests[0].messages[0].text  # type: ignore[union-attr]
     assert context.build_messages() == (
         UserMessage("Complete the task"),
         AssistantMessage(text="Corrected final."),
