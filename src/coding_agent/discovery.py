@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass
-from heapq import heappop, heappush
+from heapq import heappop, heappush, nsmallest
 from pathlib import Path, PurePosixPath
 
 from pathspec import PathSpec
@@ -157,7 +157,11 @@ class ListDirectoryTool(Tool[ListDirectoryArguments]):
 
         try:
             ignore_rules = DiscoveryIgnoreRules(self._resolver.workspace_root)
-            entries = self._visible_entries(resolved, ignore_rules)
+            entries = nsmallest(
+                self._max_entries + 1,
+                self._visible_entries(resolved, ignore_rules),
+                key=_directory_entry_order,
+            )
         except OSError:
             return _failure(
                 ToolError(
@@ -167,13 +171,6 @@ class ListDirectoryTool(Tool[ListDirectoryArguments]):
                 )
             )
 
-        entries.sort(
-            key=lambda entry: (
-                0 if entry.type == "directory" else 1,
-                entry.relative_path.casefold(),
-                entry.relative_path,
-            )
-        )
         truncated = len(entries) > self._max_entries
         content = ListDirectoryContent(
             path=resolved.workspace_relative_path or arguments.path,
@@ -186,8 +183,7 @@ class ListDirectoryTool(Tool[ListDirectoryArguments]):
         self,
         directory: ResolvedPath,
         ignore_rules: DiscoveryIgnoreRules,
-    ) -> list[DirectoryEntry]:
-        visible: list[DirectoryEntry] = []
+    ) -> Iterator[DirectoryEntry]:
         with os.scandir(directory.resolved_path) as iterator:
             for entry in iterator:
                 entry_facts = _resolve_visible_entry(self._resolver, Path(entry.path))
@@ -203,13 +199,18 @@ class ListDirectoryTool(Tool[ListDirectoryArguments]):
                     is_directory=is_directory,
                 ):
                     continue
-                visible.append(
-                    DirectoryEntry(
-                        relative_path=relative_path,
-                        type="directory" if is_directory else "file",
-                    )
+                yield DirectoryEntry(
+                    relative_path=relative_path,
+                    type="directory" if is_directory else "file",
                 )
-        return visible
+
+
+def _directory_entry_order(entry: DirectoryEntry) -> tuple[int, str, str]:
+    return (
+        0 if entry.type == "directory" else 1,
+        entry.relative_path.casefold(),
+        entry.relative_path,
+    )
 
 
 class SearchFilesTool(Tool[SearchFilesArguments]):

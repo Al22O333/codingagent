@@ -118,6 +118,46 @@ def test_composition_uses_v1_shell_timeout_defaults(
     assert captured["max_timeout_seconds"] == 300
 
 
+def test_composition_uses_v1_file_and_discovery_limits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, dict[str, object]] = {}
+
+    for name in (
+        "ReadFileTool",
+        "ListDirectoryTool",
+        "SearchFilesTool",
+        "SearchTextTool",
+    ):
+        real_constructor = getattr(cli, name)
+
+        def recording_constructor(
+            *args: object,
+            _name: str = name,
+            _constructor: object = real_constructor,
+            **kwargs: object,
+        ) -> object:
+            captured[_name] = dict(kwargs)
+            return _constructor(*args, **kwargs)  # type: ignore[operator]
+
+        monkeypatch.setattr(cli, name, recording_constructor)
+
+    build_runtime(
+        _config(tmp_path),
+        model_client=FakeModelClient([ModelResponse(text="Ready.")]),
+        user_interaction=FakeUserInteraction(),
+    )
+
+    assert captured["ReadFileTool"] == {"max_lines": 400, "max_bytes": 20_000}
+    assert captured["ListDirectoryTool"] == {"max_entries": 200}
+    assert captured["SearchFilesTool"] == {"max_results": 200}
+    assert captured["SearchTextTool"] == {
+        "max_matches": 100,
+        "max_line_bytes": 4096,
+    }
+
+
 def test_composition_root_registers_complete_v1_toolset(tmp_path: Path) -> None:
     client = FakeModelClient([ModelResponse(text="Ready.")])
     runtime = build_runtime(

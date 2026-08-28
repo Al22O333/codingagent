@@ -21,6 +21,9 @@ from .tooling import PreparedToolCall, Tool, ToolArguments, ToolExecutionResult
 from .workspace import FileOperationFacts, WorkspacePathResolver
 
 
+DEFAULT_MODEL_PROJECTION_CHARS = 16_000
+
+
 class SearchTextArguments(ToolArguments):
     """Validated model arguments for workspace text search."""
 
@@ -273,6 +276,7 @@ class SearchTextTool(Tool[SearchTextArguments]):
 
 
 __all__ = [
+    "DEFAULT_MODEL_PROJECTION_CHARS",
     "SearchTextArguments",
     "SearchTextContent",
     "SearchTextTool",

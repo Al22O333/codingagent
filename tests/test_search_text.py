@@ -8,6 +8,7 @@ import pytest
 
 from coding_agent.protocol import ToolOutcome
 from coding_agent.search_text import (
+    DEFAULT_MODEL_PROJECTION_CHARS,
     SearchTextArguments,
     SearchTextContent,
     SearchTextTool,
@@ -33,6 +34,10 @@ def _execute(tool: SearchTextTool, arguments: SearchTextArguments):
     prepared = tool.prepare("search", arguments)
     assert isinstance(prepared, PreparedToolCall)
     return tool.execute(prepared)
+
+
+def test_search_text_model_projection_default_is_bounded() -> None:
+    assert DEFAULT_MODEL_PROJECTION_CHARS == 16_000
 
 
 def test_literal_search_is_case_insensitive_by_default(tmp_path: Path) -> None:

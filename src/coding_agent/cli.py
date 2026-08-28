@@ -131,10 +131,10 @@ def build_runtime(
     resolver = WorkspacePathResolver(config.workspace)
     registry = ToolRegistry()
     tools = (
-        ReadFileTool(resolver, max_lines=400, max_bytes=64 * 1024),
-        ListDirectoryTool(resolver, max_entries=500),
-        SearchFilesTool(resolver, max_results=500),
-        SearchTextTool(resolver, max_matches=500, max_line_bytes=4096),
+        ReadFileTool(resolver, max_lines=400, max_bytes=20_000),
+        ListDirectoryTool(resolver, max_entries=200),
+        SearchFilesTool(resolver, max_results=200),
+        SearchTextTool(resolver, max_matches=100, max_line_bytes=4096),
         EditFileTool(resolver),
         CreateFileTool(resolver),
         ShellTool(
