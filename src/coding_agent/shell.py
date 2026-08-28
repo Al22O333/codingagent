@@ -322,23 +322,32 @@ def _unquote(token: str) -> str:
 
 
 class _BoundedStreamCapture:
-    """Drain a pipe completely while retaining at most max_bytes."""
+    """Drain a pipe while retaining bounded head and tail bytes."""
 
     def __init__(self, stream: BinaryIO, max_bytes: int) -> None:
         self._stream = stream
         self._max_bytes = max_bytes
-        self._retained = bytearray()
+        self._head_capacity = (max_bytes + 1) // 2
+        self._tail_capacity = max_bytes - self._head_capacity
+        self._head = bytearray()
+        self._tail = bytearray()
+        self._total_bytes = 0
         self.truncated = False
         self.error: OSError | None = None
 
     def drain(self) -> None:
         try:
             while chunk := self._stream.read(8192):
-                remaining = self._max_bytes - len(self._retained)
-                if remaining > 0:
-                    self._retained.extend(chunk[:remaining])
-                if len(chunk) > remaining:
-                    self.truncated = True
+                self._total_bytes += len(chunk)
+                head_remaining = self._head_capacity - len(self._head)
+                if head_remaining > 0:
+                    self._head.extend(chunk[:head_remaining])
+                    chunk = chunk[head_remaining:]
+                if chunk and self._tail_capacity:
+                    self._tail.extend(chunk)
+                    if len(self._tail) > self._tail_capacity:
+                        del self._tail[: len(self._tail) - self._tail_capacity]
+                self.truncated = self._total_bytes > self._max_bytes
         except OSError as error:
             self.error = error
         finally:
@@ -348,7 +357,8 @@ class _BoundedStreamCapture:
                 self.error = self.error or error
 
     def text(self) -> str:
-        return bytes(self._retained).decode("utf-8", errors="replace")
+        retained = bytes(self._head + self._tail)
+        return retained.decode("utf-8", errors="replace")
 
 
 if os.name == "nt":

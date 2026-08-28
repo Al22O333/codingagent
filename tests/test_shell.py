@@ -184,6 +184,37 @@ def test_stdout_and_stderr_are_independently_bounded(tmp_path: Path) -> None:
     assert result.content.stderr_truncated is True
 
 
+def test_truncated_capture_preserves_head_and_tail_markers(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    capture_limit = 64 * 1024
+    tool = _tool(
+        workspace,
+        max_stdout_bytes=capture_limit,
+        max_stderr_bytes=capture_limit,
+    )
+    arguments = ShellArguments(
+        command=_python_command(
+            "import sys; "
+            "sys.stdout.write('HEAD_MARKER' + 'x' * 100000 + 'TAIL_MARKER'); "
+            "sys.stderr.write('ERR_HEAD' + 'y' * 100000 + 'ERR_TAIL')"
+        )
+    )
+
+    result = _execute(tool, arguments)
+
+    assert result.outcome is ToolOutcome.SUCCESS
+    assert isinstance(result.content, ShellContent)
+    assert len(result.content.stdout.encode("utf-8")) <= capture_limit
+    assert len(result.content.stderr.encode("utf-8")) <= capture_limit
+    assert result.content.stdout.startswith("HEAD_MARKER")
+    assert result.content.stdout.endswith("TAIL_MARKER")
+    assert result.content.stderr.startswith("ERR_HEAD")
+    assert result.content.stderr.endswith("ERR_TAIL")
+    assert result.content.stdout_truncated is True
+    assert result.content.stderr_truncated is True
+
+
 def test_missing_and_non_directory_cwd_fail_during_preparation(
     tmp_path: Path,
 ) -> None:
