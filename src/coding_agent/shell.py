@@ -26,7 +26,7 @@ class ShellArguments(ToolArguments):
 
     command: str = Field(min_length=1)
     cwd: str = Field(default=".", min_length=1)
-    timeout_seconds: int | None = Field(default=None, gt=0)
+    timeout_seconds: int | None = Field(default=None, ge=1, le=300)
 
 
 @dataclass(frozen=True, slots=True)
@@ -464,6 +464,8 @@ class ShellTool(Tool[ShellArguments]):
             raise ValueError("default_timeout_seconds must be at least 1")
         if max_timeout_seconds < 1:
             raise ValueError("max_timeout_seconds must be at least 1")
+        if max_timeout_seconds > 300:
+            raise ValueError("max_timeout_seconds must not exceed 300")
         if default_timeout_seconds > max_timeout_seconds:
             raise ValueError(
                 "default_timeout_seconds must not exceed max_timeout_seconds"

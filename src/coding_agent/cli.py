@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from typing import TextIO
@@ -39,6 +40,12 @@ _DEFAULT_SECRET_ENVIRONMENT_NAMES = frozenset(
     {"CODING_AGENT_API_KEY", "OPENAI_API_KEY"}
 )
 _MAX_SHELL_TIMEOUT_SECONDS = 5 * 60
+
+
+def _platform_shell_executable() -> str:
+    if os.name == "nt":
+        return os.environ["COMSPEC"]
+    return "/bin/sh"
 
 
 CLIConfig = AgentConfig
@@ -132,8 +139,8 @@ def build_runtime(
         CreateFileTool(resolver),
         ShellTool(
             resolver,
-            ShellBackend(config.shell_executable),
-            default_timeout_seconds=60,
+            ShellBackend(_platform_shell_executable()),
+            default_timeout_seconds=120,
             max_timeout_seconds=_MAX_SHELL_TIMEOUT_SECONDS,
             max_stdout_bytes=64 * 1024,
             max_stderr_bytes=64 * 1024,

@@ -19,12 +19,6 @@ ACTIVE_RUN_DURATION_RANGE = (1, 3_600)
 CONTEXT_CHARS_RANGE = (8_000, 256_000)
 
 
-def _default_shell_executable() -> str:
-    if os.name == "nt":
-        return os.environ.get("COMSPEC", "cmd.exe")
-    return "/bin/sh"
-
-
 @dataclass(frozen=True, slots=True)
 class AgentConfig:
     """Effective v1 startup and operational configuration."""
@@ -39,8 +33,6 @@ class AgentConfig:
     max_context_chars: int = DEFAULT_MAX_CONTEXT_CHARS
     debug: bool = False
     api_key_environment_name: str = "CODING_AGENT_API_KEY"
-    # Retained until the dedicated Shell-backend conformance step.
-    shell_executable: str = field(default_factory=_default_shell_executable)
 
     def __post_init__(self) -> None:
         if not self.model.strip():
@@ -124,7 +116,6 @@ def load_agent_config(
             DEFAULT_MAX_CONTEXT_CHARS,
         ),
         debug=debug if debug is not None else _environment_bool(values, "CODING_AGENT_DEBUG"),
-        shell_executable=values.get("CODING_AGENT_SHELL") or _default_shell_executable(),
     )
 
 

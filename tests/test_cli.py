@@ -57,7 +57,7 @@ def test_config_loads_minimal_environment_without_exposing_secret(tmp_path: Path
     assert config.workspace == tmp_path
     assert config.model == "provider-model"
     assert config.base_url == "https://provider.invalid/v1"
-    assert config.shell_executable == "test-shell"
+    assert not hasattr(config, "shell_executable")
     assert "secret-value" not in repr(config)
 
     with pytest.raises(ValueError, match="CODING_AGENT_MODEL"):
@@ -78,20 +78,44 @@ def test_config_loads_minimal_environment_without_exposing_secret(tmp_path: Path
         )
 
 
-def test_default_windows_shell_uses_full_comspec_path(tmp_path: Path) -> None:
+def test_platform_shell_ignores_public_environment_override(tmp_path: Path) -> None:
     config = load_config(
         str(tmp_path),
         {
             "CODING_AGENT_MODEL": "model",
             "CODING_AGENT_API_KEY": "key",
             "CODING_AGENT_BASE_URL": "https://provider.invalid/v1",
+            "CODING_AGENT_SHELL": "untrusted-override",
         },
     )
     if os.name == "nt":
-        assert config.shell_executable == os.environ["COMSPEC"]
-        assert Path(config.shell_executable).is_absolute()
+        assert cli._platform_shell_executable() == os.environ["COMSPEC"]
+        assert Path(cli._platform_shell_executable()).is_absolute()
     else:
-        assert config.shell_executable == "/bin/sh"
+        assert cli._platform_shell_executable() == "/bin/sh"
+    assert not hasattr(config, "shell_executable")
+
+
+def test_composition_uses_v1_shell_timeout_defaults(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    real_shell_tool = cli.ShellTool
+
+    def recording_shell_tool(*args: object, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return real_shell_tool(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(cli, "ShellTool", recording_shell_tool)
+    build_runtime(
+        _config(tmp_path),
+        model_client=FakeModelClient([ModelResponse(text="Ready.")]),
+        user_interaction=FakeUserInteraction(),
+    )
+
+    assert captured["default_timeout_seconds"] == 120
+    assert captured["max_timeout_seconds"] == 300
 
 
 def test_composition_root_registers_complete_v1_toolset(tmp_path: Path) -> None:

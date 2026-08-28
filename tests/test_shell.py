@@ -121,7 +121,7 @@ def test_timeout_is_operation_failure_and_captures_partial_output(
     assert "started" in result.content.stdout
 
 
-def test_timeout_preparation_uses_default_accepts_small_and_rejects_huge(
+def test_timeout_schema_and_preparation_enforce_absolute_and_configured_caps(
     tmp_path: Path,
 ) -> None:
     workspace = tmp_path / "workspace"
@@ -137,21 +137,31 @@ def test_timeout_preparation_uses_default_accepts_small_and_rejects_huge(
         "small",
         ShellArguments(command="pytest", timeout_seconds=3),
     )
-    huge = tool.prepare(
-        "huge",
-        ShellArguments(command="pytest", timeout_seconds=999_999_999),
+    above_configured = tool.prepare(
+        "above-configured",
+        ShellArguments(command="pytest", timeout_seconds=11),
     )
 
     assert isinstance(default, PreparedToolCall)
     assert default.operation_facts.effective_timeout_seconds == 5  # type: ignore[union-attr]
     assert isinstance(small, PreparedToolCall)
     assert small.operation_facts.effective_timeout_seconds == 3  # type: ignore[union-attr]
-    assert isinstance(huge, ToolError)
-    assert huge.code == "TIMEOUT_EXCEEDS_MAXIMUM"
-    assert huge.details == {
-        "requested_timeout_seconds": 999_999_999,
+    assert isinstance(above_configured, ToolError)
+    assert above_configured.code == "TIMEOUT_EXCEEDS_MAXIMUM"
+    assert above_configured.details == {
+        "requested_timeout_seconds": 11,
         "maximum_timeout_seconds": 10,
     }
+    with pytest.raises(ValueError):
+        ShellArguments(command="pytest", timeout_seconds=0)
+    with pytest.raises(ValueError):
+        ShellArguments(command="pytest", timeout_seconds=301)
+
+    timeout_schema = ShellArguments.model_json_schema()["properties"][
+        "timeout_seconds"
+    ]["anyOf"][0]
+    assert timeout_schema["minimum"] == 1
+    assert timeout_schema["maximum"] == 300
 
 
 def test_stdout_and_stderr_are_independently_bounded(tmp_path: Path) -> None:
@@ -292,6 +302,23 @@ def test_shell_tool_rejects_default_timeout_above_maximum(tmp_path: Path) -> Non
             _backend(),
             default_timeout_seconds=6,
             max_timeout_seconds=5,
+            max_stdout_bytes=1,
+            max_stderr_bytes=1,
+        )
+
+
+def test_shell_tool_rejects_configured_maximum_above_absolute_cap(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    with pytest.raises(ValueError, match="must not exceed 300"):
+        ShellTool(
+            WorkspacePathResolver(workspace),
+            _backend(),
+            default_timeout_seconds=120,
+            max_timeout_seconds=301,
             max_stdout_bytes=1,
             max_stderr_bytes=1,
         )
