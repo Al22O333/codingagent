@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TextIO
 
 from .ask_user import AskUserTool
+from .config import AgentConfig, load_agent_config
 from .context import ContextManager
 from .create_file import CreateFileTool
 from .discovery import ListDirectoryTool, SearchFilesTool
@@ -43,20 +41,7 @@ _DEFAULT_SECRET_ENVIRONMENT_NAMES = frozenset(
 _MAX_SHELL_TIMEOUT_SECONDS = 5 * 60
 
 
-def _default_shell_executable() -> str:
-    if os.name == "nt":
-        return os.environ.get("COMSPEC", "cmd.exe")
-    return "/bin/sh"
-
-
-@dataclass(frozen=True, slots=True)
-class CLIConfig:
-    workspace: Path
-    model: str
-    api_key: str = field(repr=False)
-    base_url: str | None = None
-    shell_executable: str = field(default_factory=_default_shell_executable)
-    api_key_environment_name: str = "CODING_AGENT_API_KEY"
+CLIConfig = AgentConfig
 
 
 class ConsoleUserInteraction:
@@ -104,22 +89,26 @@ class ConsoleUserInteraction:
 def load_config(
     workspace: str,
     environ: Mapping[str, str] | None = None,
+    *,
+    model: str | None = None,
+    base_url: str | None = None,
+    max_model_turns: int | None = None,
+    max_tool_call_attempts: int | None = None,
+    max_active_run_duration_seconds: int | None = None,
+    max_context_chars: int | None = None,
+    debug: bool | None = None,
 ) -> CLIConfig:
-    """Load the minimal environment-backed provider and workspace config."""
-    values = os.environ if environ is None else environ
-    model = values.get("CODING_AGENT_MODEL", "").strip()
-    api_key = values.get("CODING_AGENT_API_KEY", "").strip()
-    if not model:
-        raise ValueError("CODING_AGENT_MODEL is required")
-    if not api_key:
-        raise ValueError("CODING_AGENT_API_KEY is required")
-    return CLIConfig(
-        workspace=Path(workspace),
+    """Compatibility entry point for the centralized AgentConfig loader."""
+    return load_agent_config(
+        workspace,
+        environ,
         model=model,
-        api_key=api_key,
-        base_url=values.get("CODING_AGENT_BASE_URL") or None,
-        shell_executable=values.get("CODING_AGENT_SHELL")
-        or _default_shell_executable(),
+        base_url=base_url,
+        max_model_turns=max_model_turns,
+        max_tool_call_attempts=max_tool_call_attempts,
+        max_active_run_duration_seconds=max_active_run_duration_seconds,
+        max_context_chars=max_context_chars,
+        debug=debug,
     )
 
 
@@ -172,12 +161,12 @@ def build_runtime(
     tool_activity = _tool_activity_writer(stdout) if stdout is not None else None
     return AgentRuntime(
         concrete_model_client,
-        ContextManager(),
+        ContextManager(max_context_chars=config.max_context_chars),
         registry,
         RuntimeLimits(
-            max_model_turns=50,
-            max_tool_call_attempts=100,
-            max_active_run_duration_seconds=30 * 60,
+            max_model_turns=config.max_model_turns,
+            max_tool_call_attempts=config.max_tool_call_attempts,
+            max_active_run_duration_seconds=config.max_active_run_duration_seconds,
             max_transport_retries=2,
             max_consecutive_protocol_errors=3,
         ),
@@ -221,6 +210,13 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
         help="user-selected local workspace root",
     )
+    parser.add_argument("--model")
+    parser.add_argument("--base-url")
+    parser.add_argument("--max-turns", type=int)
+    parser.add_argument("--max-tool-calls", type=int)
+    parser.add_argument("--max-duration", type=int)
+    parser.add_argument("--max-context-chars", type=int)
+    parser.add_argument("--debug", action="store_true", default=None)
     parser.add_argument(
         "task",
         nargs="*",
@@ -233,7 +229,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run one task or a minimal multi-Run interactive Session."""
     args = _parser().parse_args(argv)
     try:
-        config = load_config(args.workspace)
+        config = load_config(
+            args.workspace,
+            model=args.model,
+            base_url=args.base_url,
+            max_model_turns=args.max_turns,
+            max_tool_call_attempts=args.max_tool_calls,
+            max_active_run_duration_seconds=args.max_duration,
+            max_context_chars=args.max_context_chars,
+            debug=args.debug,
+        )
         runtime = build_runtime(config, stdout=sys.stdout)
     except (OSError, ValueError) as error:
         print(f"Startup error: {error}", file=sys.stderr)

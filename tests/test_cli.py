@@ -29,7 +29,12 @@ from coding_agent.shell import ShellContent
 
 
 def _config(workspace: Path) -> CLIConfig:
-    return CLIConfig(workspace=workspace, model="test-model", api_key="test-key")
+    return CLIConfig(
+        workspace=workspace,
+        model="test-model",
+        base_url="https://provider.invalid/v1",
+        api_key="test-key",
+    )
 
 
 def _python_command(source: str) -> str:
@@ -56,9 +61,21 @@ def test_config_loads_minimal_environment_without_exposing_secret(tmp_path: Path
     assert "secret-value" not in repr(config)
 
     with pytest.raises(ValueError, match="CODING_AGENT_MODEL"):
-        load_config(str(tmp_path), {"CODING_AGENT_API_KEY": "key"})
+        load_config(
+            str(tmp_path),
+            {
+                "CODING_AGENT_API_KEY": "key",
+                "CODING_AGENT_BASE_URL": "https://provider.invalid/v1",
+            },
+        )
     with pytest.raises(ValueError, match="CODING_AGENT_API_KEY"):
-        load_config(str(tmp_path), {"CODING_AGENT_MODEL": "model"})
+        load_config(
+            str(tmp_path),
+            {
+                "CODING_AGENT_MODEL": "model",
+                "CODING_AGENT_BASE_URL": "https://provider.invalid/v1",
+            },
+        )
 
 
 def test_default_windows_shell_uses_full_comspec_path(tmp_path: Path) -> None:
@@ -67,6 +84,7 @@ def test_default_windows_shell_uses_full_comspec_path(tmp_path: Path) -> None:
         {
             "CODING_AGENT_MODEL": "model",
             "CODING_AGENT_API_KEY": "key",
+            "CODING_AGENT_BASE_URL": "https://provider.invalid/v1",
         },
     )
     if os.name == "nt":
@@ -142,6 +160,7 @@ def test_composition_filters_runtime_secrets_but_preserves_ordinary_environment(
     config = CLIConfig(
         workspace=tmp_path,
         model="test-model",
+        base_url="https://provider.invalid/v1",
         api_key=secret,
         api_key_environment_name="CODING_AGENT_TEST_API_KEY",
     )
@@ -215,6 +234,7 @@ def test_one_shot_main_starts_runtime_and_prints_final(
 ) -> None:
     monkeypatch.setenv("CODING_AGENT_MODEL", "test-model")
     monkeypatch.setenv("CODING_AGENT_API_KEY", "test-key")
+    monkeypatch.setenv("CODING_AGENT_BASE_URL", "https://provider.invalid/v1")
     fake = FakeModelClient([ModelResponse(text="Finished from CLI.")])
     monkeypatch.setattr(cli, "OpenAICompatibleModelClient", lambda config: fake)
 
@@ -280,6 +300,7 @@ def test_cli_provider_failure_is_understandable_and_does_not_leak_secret(
     secret = "super-secret-provider-key"
     monkeypatch.setenv("CODING_AGENT_MODEL", "test-model")
     monkeypatch.setenv("CODING_AGENT_API_KEY", secret)
+    monkeypatch.setenv("CODING_AGENT_BASE_URL", "https://provider.invalid/v1")
     fake = FakeModelClient([FatalProviderError(f"invalid API key: {secret}")])
     monkeypatch.setattr(cli, "OpenAICompatibleModelClient", lambda config: fake)
 
