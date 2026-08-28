@@ -110,12 +110,17 @@ def test_read_file_tool_loop_reaches_final_response(tmp_path: Path) -> None:
     assert run.model_turns == 2
     assert run.tool_call_attempts == 1
     messages = context.build_messages()
-    assert messages[0] == UserMessage("Inspect main.py")
-    assert messages[1] == AssistantMessage(
+    assert messages == (
+        UserMessage("Inspect main.py"),
+        AssistantMessage(text="The file prints hello."),
+    )
+    request_messages = client.requests[1].messages
+    assert request_messages[0] == UserMessage("Inspect main.py")
+    assert request_messages[1] == AssistantMessage(
         text="I will inspect it.", tool_calls=(tool_call,)
     )
-    assert isinstance(messages[2], ToolResultMessage)
-    tool_result = messages[2].results[0]
+    assert isinstance(request_messages[2], ToolResultMessage)
+    tool_result = request_messages[2].results[0]
     assert tool_result.call_id == "call-read"
     assert tool_result.tool_name == "read_file"
     assert tool_result.outcome is ToolOutcome.SUCCESS
@@ -128,9 +133,8 @@ def test_read_file_tool_loop_reaches_final_response(tmp_path: Path) -> None:
         truncated=False,
         next_start_line=None,
     )
-    assert messages[3] == AssistantMessage(text="The file prints hello.")
     assert client.requests[0].tools[0].name == "read_file"
-    assert client.requests[1].messages == messages[:3]
+    assert client.requests[1].messages == request_messages
 
 
 def test_unknown_tool_returns_validation_observation_then_continues(
@@ -139,7 +143,7 @@ def test_unknown_tool_returns_validation_observation_then_continues(
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     call = ToolCall(call_id="unknown-1", name="read_files", raw_arguments={})
-    runtime, _, context = _runtime(
+    runtime, client, _ = _runtime(
         workspace,
         [
             ModelResponse(text=None, tool_calls=(call,)),
@@ -149,7 +153,7 @@ def test_unknown_tool_returns_validation_observation_then_continues(
 
     run = runtime.run("Inspect files")
 
-    result = context.build_messages()[2].results[0]  # type: ignore[union-attr]
+    result = client.requests[1].messages[2].results[0]  # type: ignore[union-attr]
     assert result.call_id == "unknown-1"
     assert result.outcome is ToolOutcome.VALIDATION_ERROR
     assert result.error is not None and result.error.code == "UNKNOWN_TOOL"
@@ -165,7 +169,7 @@ def test_invalid_arguments_return_validation_observation(tmp_path: Path) -> None
         name="read_file",
         raw_arguments={"path": "main.py", "start_line": 0},
     )
-    runtime, _, context = _runtime(
+    runtime, client, _ = _runtime(
         workspace,
         [
             ModelResponse(text=None, tool_calls=(call,)),
@@ -175,7 +179,7 @@ def test_invalid_arguments_return_validation_observation(tmp_path: Path) -> None
 
     run = runtime.run("Inspect main.py")
 
-    result = context.build_messages()[2].results[0]  # type: ignore[union-attr]
+    result = client.requests[1].messages[2].results[0]  # type: ignore[union-attr]
     assert result.call_id == "invalid-1"
     assert result.outcome is ToolOutcome.VALIDATION_ERROR
     assert result.error is not None and result.error.code == "INVALID_ARGUMENTS"
@@ -190,7 +194,7 @@ def test_preparation_failure_becomes_runtime_tool_result(tmp_path: Path) -> None
         name="read_file",
         raw_arguments={"path": "missing.py"},
     )
-    runtime, _, context = _runtime(
+    runtime, client, _ = _runtime(
         workspace,
         [
             ModelResponse(text=None, tool_calls=(call,)),
@@ -200,7 +204,7 @@ def test_preparation_failure_becomes_runtime_tool_result(tmp_path: Path) -> None
 
     run = runtime.run("Inspect missing.py")
 
-    result = context.build_messages()[2].results[0]  # type: ignore[union-attr]
+    result = client.requests[1].messages[2].results[0]  # type: ignore[union-attr]
     assert result.call_id == "missing-1"
     assert result.outcome is ToolOutcome.OPERATION_FAILURE
     assert result.error is not None and result.error.code == "FILE_NOT_FOUND"
@@ -217,7 +221,7 @@ def test_workspace_boundary_is_rejected_without_execution(tmp_path: Path) -> Non
         name="read_file",
         raw_arguments={"path": str(outside)},
     )
-    runtime, _, context = _runtime(
+    runtime, client, _ = _runtime(
         workspace,
         [
             ModelResponse(text=None, tool_calls=(call,)),
@@ -227,7 +231,7 @@ def test_workspace_boundary_is_rejected_without_execution(tmp_path: Path) -> Non
 
     runtime.run("Inspect outside file")
 
-    result = context.build_messages()[2].results[0]  # type: ignore[union-attr]
+    result = client.requests[1].messages[2].results[0]  # type: ignore[union-attr]
     assert result.outcome is ToolOutcome.POLICY_REJECTED
     assert result.error is not None and result.error.code == "WORKSPACE_BOUNDARY"
     assert "secret" not in repr(result.content)
@@ -244,7 +248,7 @@ def test_sensitive_path_rejection_does_not_execute(
         name="read_file",
         raw_arguments={"path": ".env"},
     )
-    runtime, _, context = _runtime(
+    runtime, client, _ = _runtime(
         workspace,
         [
             ModelResponse(text=None, tool_calls=(call,)),
@@ -255,7 +259,7 @@ def test_sensitive_path_rejection_does_not_execute(
 
     runtime.run("Inspect .env")
 
-    result = context.build_messages()[2].results[0]  # type: ignore[union-attr]
+    result = client.requests[1].messages[2].results[0]  # type: ignore[union-attr]
     assert result.outcome is ToolOutcome.POLICY_REJECTED
     assert result.error is not None
     assert result.error.code == "USER_REJECTED_CONFIRMATION"

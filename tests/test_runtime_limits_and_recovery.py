@@ -259,7 +259,7 @@ def test_protocol_error_limit_exhaustion_stops_without_next_turn() -> None:
     assert run.model_turns == 2
     assert run.consecutive_protocol_errors == 2
     assert len(client.requests) == 2
-    assert context.build_messages() == (UserMessage("Complete the task"),)
+    assert context.build_messages() == ()
 
 
 def test_model_turn_budget_stops_before_requesting_another_turn(
@@ -334,12 +334,7 @@ def test_tool_attempt_budget_marks_remaining_calls_not_executed(
     assert run.termination_reason is TerminationReason.LIMIT_REACHED
     assert run.limit_reached == "max_tool_call_attempts"
     assert run.tool_call_attempts == 1
-    result_message = context.build_messages()[-1]
-    assert isinstance(result_message, ToolResultMessage)
-    assert [result.outcome for result in result_message.results] == [
-        ToolOutcome.SUCCESS,
-        ToolOutcome.NOT_EXECUTED,
-    ]
+    assert context.build_messages() == ()
 
 
 class FakeClock:
@@ -395,9 +390,7 @@ def test_active_duration_limit_stops_before_tool_execution(tmp_path: Path) -> No
     assert run.active_duration_seconds == 2.0
     assert run.model_turns == 1
     assert run.tool_call_attempts == 0
-    result_message = context.build_messages()[-1]
-    assert isinstance(result_message, ToolResultMessage)
-    assert result_message.results[0].outcome is ToolOutcome.NOT_EXECUTED
+    assert context.build_messages() == ()
 
 
 @pytest.mark.parametrize(

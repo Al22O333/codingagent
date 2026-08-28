@@ -37,22 +37,30 @@ class ContextManager:
         self._completed_run_continuity: list[tuple[InternalMessage, ...]] = []
         self._messages: list[InternalMessage] = []
         self._pending_tool_calls: dict[str, str] = {}
+        self._run_active = False
 
     def start_run(self, message: UserMessage) -> None:
-        """Start a Run, compacting the prior Run to bounded task/final continuity."""
-        if self._pending_tool_calls:
-            raise ContextOrderError("cannot start a run with pending tool calls")
-
-        continuity = self._completed_run_summary()
-        if continuity is not None and self._max_retained_completed_runs:
-            self._completed_run_continuity.append(continuity)
-            del self._completed_run_continuity[
-                : -self._max_retained_completed_runs
-            ]
-        elif self._max_retained_completed_runs == 0:
-            self._completed_run_continuity.clear()
-
+        """Start one Run with fresh transient history."""
+        if self._run_active:
+            raise ContextOrderError("cannot start a run while another run is active")
+        self._pending_tool_calls.clear()
         self._messages = [message]
+        self._run_active = True
+
+    def end_run(self, *, completed: bool) -> None:
+        """Finalize continuity and clear all current-Run transient state."""
+        if self._run_active and completed:
+            continuity = self._completed_run_summary()
+            if continuity is not None and self._max_retained_completed_runs:
+                self._completed_run_continuity.append(continuity)
+                del self._completed_run_continuity[
+                    : -self._max_retained_completed_runs
+                ]
+        if self._max_retained_completed_runs == 0:
+            self._completed_run_continuity.clear()
+        self._messages.clear()
+        self._pending_tool_calls.clear()
+        self._run_active = False
 
     def record_user_message(self, message: UserMessage) -> None:
         """Append an ordinary user message to the conversation."""

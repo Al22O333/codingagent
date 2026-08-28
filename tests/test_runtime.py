@@ -98,7 +98,7 @@ def test_empty_no_tool_response_follows_protocol_error_path(
     assert run.final_response is None
     assert run.termination_reason is TerminationReason.PROTOCOL_FAILURE
     assert isinstance(run.last_error, ModelProtocolError)
-    assert context.build_messages() == (UserMessage("Complete the task"),)
+    assert context.build_messages() == ()
 
 
 def test_session_keeps_sequential_runs_and_conversation_continuity() -> None:
@@ -224,7 +224,7 @@ def test_keyboard_interrupt_cancels_run_without_consuming_model_turn() -> None:
     assert run.model_turns == 0
     assert run.final_response is None
     assert run.termination_reason is TerminationReason.USER_CANCELLATION
-    assert context.build_messages() == (UserMessage("Complete the task"),)
+    assert context.build_messages() == ()
 
 
 def test_multiple_successful_tool_calls_are_processed_before_next_turn(
@@ -269,7 +269,7 @@ def test_multiple_successful_tool_calls_are_processed_before_next_turn(
 
     run = runtime.run("Inspect both files")
 
-    results = context.build_messages()[2].results  # type: ignore[union-attr]
+    results = client.requests[1].messages[2].results  # type: ignore[union-attr]
     assert [result.outcome for result in results] == [
         ToolOutcome.SUCCESS,
         ToolOutcome.SUCCESS,

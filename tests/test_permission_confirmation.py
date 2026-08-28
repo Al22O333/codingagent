@@ -89,7 +89,7 @@ def _runtime(
     interaction: ObservingInteraction,
     *,
     clock: FakeClock | None = None,
-) -> tuple[AgentRuntime, ContextManager]:
+) -> tuple[AgentRuntime, ContextManager, FakeModelClient]:
     registry = ToolRegistry()
     registry.register(
         ReadFileTool(
@@ -99,8 +99,9 @@ def _runtime(
         )
     )
     context = ContextManager()
+    client = FakeModelClient(responses)
     runtime = AgentRuntime(
-        FakeModelClient(responses),
+        client,
         context,
         registry,
         LIMITS,
@@ -109,11 +110,11 @@ def _runtime(
         **({"clock": clock} if clock is not None else {}),
     )
     interaction.runtime = runtime
-    return runtime, context
+    return runtime, context, client
 
 
-def _first_results(context: ContextManager) -> tuple:
-    message = context.build_messages()[2]
+def _first_results(client: FakeModelClient) -> tuple:
+    message = client.requests[1].messages[2]
     assert isinstance(message, ToolResultMessage)
     return message.results
 
@@ -123,7 +124,7 @@ def test_approve_executes_exact_pending_action_and_cleans_state(tmp_path: Path) 
     workspace.mkdir()
     (workspace / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
     interaction = ObservingInteraction((ConfirmationDecision.APPROVE,))
-    runtime, context = _runtime(
+    runtime, _, client = _runtime(
         workspace,
         [
             ModelResponse(text=None, tool_calls=(_sensitive_call("read-secret"),)),
@@ -134,7 +135,7 @@ def test_approve_executes_exact_pending_action_and_cleans_state(tmp_path: Path) 
 
     run = runtime.run("Inspect .env")
 
-    result = _first_results(context)[0]
+    result = _first_results(client)[0]
     assert interaction.observed_waiting
     assert result.outcome is ToolOutcome.SUCCESS
     assert "TOKEN=secret" in repr(result.content)
@@ -153,7 +154,7 @@ def test_approved_confirmation_ends_old_batch(tmp_path: Path) -> None:
     (workspace / ".env").write_text("A=1\n", encoding="utf-8")
     (workspace / "later.py").write_text("pass\n", encoding="utf-8")
     interaction = ObservingInteraction((ConfirmationDecision.APPROVE,))
-    runtime, context = _runtime(
+    runtime, _, client = _runtime(
         workspace,
         [
             ModelResponse(
@@ -170,7 +171,7 @@ def test_approved_confirmation_ends_old_batch(tmp_path: Path) -> None:
 
     run = runtime.run("Inspect files")
 
-    first, later = _first_results(context)
+    first, later = _first_results(client)
     assert first.outcome is ToolOutcome.SUCCESS
     assert later.outcome is ToolOutcome.NOT_EXECUTED
     assert run.tool_call_attempts == 1
@@ -182,7 +183,7 @@ def test_reject_and_cancel_do_not_execute_pending_action(tmp_path: Path) -> None
     (workspace / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
 
     rejecting = ObservingInteraction((ConfirmationDecision.REJECT,))
-    reject_runtime, reject_context = _runtime(
+    reject_runtime, _, reject_client = _runtime(
         workspace,
         [
             ModelResponse(text=None, tool_calls=(_sensitive_call("reject"),)),
@@ -191,7 +192,7 @@ def test_reject_and_cancel_do_not_execute_pending_action(tmp_path: Path) -> None
         rejecting,
     )
     rejected = reject_runtime.run("Inspect .env")
-    reject_result = _first_results(reject_context)[0]
+    reject_result = _first_results(reject_client)[0]
     assert reject_result.outcome is ToolOutcome.POLICY_REJECTED
     assert reject_result.error is not None
     assert reject_result.error.code == "USER_REJECTED_CONFIRMATION"
@@ -200,7 +201,7 @@ def test_reject_and_cancel_do_not_execute_pending_action(tmp_path: Path) -> None
     assert rejected.pending_action is None
 
     cancelling = ObservingInteraction((ConfirmationDecision.CANCEL,))
-    cancel_runtime, cancel_context = _runtime(
+    cancel_runtime, cancel_context, cancel_client = _runtime(
         workspace,
         [
             ModelResponse(text=None, tool_calls=(_sensitive_call("cancel"),)),
@@ -209,13 +210,12 @@ def test_reject_and_cancel_do_not_execute_pending_action(tmp_path: Path) -> None
         cancelling,
     )
     cancelled = cancel_runtime.run("Inspect .env")
-    cancel_result = _first_results(cancel_context)[0]
-    assert cancel_result.error is not None
-    assert cancel_result.error.code == "USER_CANCELLED_CONFIRMATION"
     assert cancelled.state is RunState.CANCELLED
     assert cancelled.termination_reason is TerminationReason.USER_CANCELLATION
     assert cancelled.model_turns == 1
     assert cancelled.pending_action is None
+    assert len(cancel_client.requests) == 1
+    assert cancel_context.build_messages() == ()
 
 
 def test_each_new_action_requires_a_fresh_confirmation(tmp_path: Path) -> None:
@@ -226,7 +226,7 @@ def test_each_new_action_requires_a_fresh_confirmation(tmp_path: Path) -> None:
     interaction = ObservingInteraction(
         (ConfirmationDecision.APPROVE, ConfirmationDecision.APPROVE)
     )
-    runtime, _ = _runtime(
+    runtime, _, _ = _runtime(
         workspace,
         [
             ModelResponse(text=None, tool_calls=(_sensitive_call("one", ".env"),)),
@@ -255,7 +255,7 @@ def test_waiting_for_confirmation_does_not_consume_active_duration(
     (workspace / ".env").write_text("A=1\n", encoding="utf-8")
     clock = FakeClock()
     interaction = AdvancingInteraction(clock)
-    runtime, _ = _runtime(
+    runtime, _, _ = _runtime(
         workspace,
         [
             ModelResponse(text=None, tool_calls=(_sensitive_call("wait"),)),

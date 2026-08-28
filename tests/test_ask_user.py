@@ -93,7 +93,7 @@ def test_answer_becomes_single_tool_observation_and_next_model_turn() -> None:
 
     run = runtime.run("Find the issue")
 
-    messages = context.build_messages()
+    messages = client.requests[1].messages
     result_message = messages[2]
     assert isinstance(result_message, ToolResultMessage)
     assert result_message.results[0].outcome is ToolOutcome.SUCCESS
@@ -112,7 +112,7 @@ def test_answered_clarification_ends_old_batch_and_updates_trusted_constraints()
             ClarificationResponse(ClarificationStatus.ANSWERED, "不要运行命令"),
         )
     )
-    runtime, context, _ = _runtime(
+    runtime, _, client = _runtime(
         [
             ModelResponse(
                 text=None,
@@ -128,7 +128,7 @@ def test_answered_clarification_ends_old_batch_and_updates_trusted_constraints()
 
     run = runtime.run("Continue carefully")
 
-    result_message = context.build_messages()[2]
+    result_message = client.requests[1].messages[2]
     assert isinstance(result_message, ToolResultMessage)
     first, second = result_message.results
     assert first.outcome is ToolOutcome.SUCCESS
@@ -152,21 +152,16 @@ def test_cancelled_clarification_cancels_same_run_without_next_turn() -> None:
 
     run = runtime.run("Find the issue")
 
-    result_message = context.build_messages()[2]
-    assert isinstance(result_message, ToolResultMessage)
-    result = result_message.results[0]
-    assert result.outcome is ToolOutcome.OPERATION_FAILURE
-    assert result.error is not None
-    assert result.error.code == "USER_CANCELLED_CLARIFICATION"
     assert run.state is RunState.CANCELLED
     assert run.termination_reason is TerminationReason.USER_CANCELLATION
     assert run.pending_user_request is None
     assert len(client.requests) == 1
+    assert context.build_messages() == ()
 
 
 def test_blank_question_fails_validation_without_user_interaction() -> None:
     interaction = FakeUserInteraction()
-    runtime, context, _ = _runtime(
+    runtime, _, client = _runtime(
         [
             ModelResponse(text=None, tool_calls=(_call(question="   "),)),
             ModelResponse(text="The question was invalid."),
@@ -176,7 +171,7 @@ def test_blank_question_fails_validation_without_user_interaction() -> None:
 
     run = runtime.run("Find the issue")
 
-    result_message = context.build_messages()[2]
+    result_message = client.requests[1].messages[2]
     assert isinstance(result_message, ToolResultMessage)
     result = result_message.results[0]
     assert result.outcome is ToolOutcome.VALIDATION_ERROR

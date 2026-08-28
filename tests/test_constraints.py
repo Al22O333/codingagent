@@ -64,7 +64,7 @@ def _runtime(
         user_interaction=FakeUserInteraction(),
     )
     run = runtime.run(task)
-    result = context.build_messages()[2].results[0]  # type: ignore[union-attr]
+    result = client.requests[1].messages[2].results[0]  # type: ignore[union-attr]
     return runtime, run, result
 
 

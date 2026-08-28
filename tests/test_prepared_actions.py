@@ -232,7 +232,7 @@ def test_unexpected_preparation_bug_becomes_internal_tool_error() -> None:
 
     runtime.run("Trigger preparation")
 
-    result = context.build_messages()[2].results[0]  # type: ignore[union-attr]
+    result = client.requests[1].messages[2].results[0]  # type: ignore[union-attr]
     assert result.outcome is ToolOutcome.OPERATION_FAILURE
     assert result.error is not None
     assert result.error.code == "INTERNAL_TOOL_ERROR"

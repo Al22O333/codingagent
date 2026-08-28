@@ -248,6 +248,9 @@ class AgentRuntime:
                 RunState.CANCELLED,
             }:
                 self._clear_pending_state(agent_run)
+                self._context_manager.end_run(
+                    completed=agent_run.state is RunState.COMPLETED
+                )
         return agent_run
 
     def _run_until_terminal(

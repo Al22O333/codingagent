@@ -111,6 +111,7 @@ def test_new_run_keeps_only_bounded_task_and_final_continuity() -> None:
     context.record_assistant_message(old_call)
     context.record_tool_result_message(old_result)
     context.record_assistant_message(AssistantMessage("First final"))
+    context.end_run(completed=True)
     context.start_run(UserMessage("Second task"))
 
     assert context.build_messages() == (
@@ -127,6 +128,7 @@ def test_completed_run_continuity_is_bounded() -> None:
     for number in range(3):
         context.start_run(UserMessage(f"Task {number}"))
         context.record_assistant_message(AssistantMessage(f"Final {number}"))
+        context.end_run(completed=True)
 
     context.start_run(UserMessage("Current task"))
 
@@ -135,6 +137,30 @@ def test_completed_run_continuity_is_bounded() -> None:
         AssistantMessage("Final 2"),
         UserMessage("Current task"),
     )
+
+
+def test_failed_and_cancelled_runs_do_not_enter_continuity() -> None:
+    context = ContextManager(max_retained_completed_runs=1)
+
+    context.start_run(UserMessage("Failed task"))
+    context.record_assistant_message(AssistantMessage("Not a final result"))
+    context.end_run(completed=False)
+    context.start_run(UserMessage("Next task"))
+
+    assert context.build_messages() == (UserMessage("Next task"),)
+
+
+def test_end_run_clears_pending_tool_correspondence() -> None:
+    context = ContextManager()
+    context.start_run(UserMessage("Interrupted task"))
+    context.record_assistant_message(
+        AssistantMessage(None, (_tool_call("pending"),))
+    )
+
+    context.end_run(completed=False)
+    context.start_run(UserMessage("Recovery task"))
+
+    assert context.build_messages() == (UserMessage("Recovery task"),)
 
 
 def test_trimming_drops_old_tool_groups_atomically_and_keeps_latest() -> None:

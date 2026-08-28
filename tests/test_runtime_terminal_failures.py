@@ -99,7 +99,12 @@ def test_local_tool_keyboard_interrupt_cancels_without_next_model_turn(
     assert run.pending_user_request is None
     assert run.wait_reason is None
     assert len(client.requests) == 1
-    assert len(context.build_messages()) == 2
+    assert context.build_messages() == ()
+
+    second = runtime.run("Try again")
+
+    assert second.state is RunState.COMPLETED
+    assert len(client.requests) == 2
 
 
 def test_policy_exception_fails_without_escaping_or_next_model_turn(
