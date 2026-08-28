@@ -17,7 +17,7 @@ from coding_agent.protocol import (
     ToolResultMessage,
     UserMessage,
 )
-from coding_agent.read_file import ReadFileContent, ReadFileTool
+from coding_agent.read_file import ReadFileTool
 from coding_agent.runtime import AgentRuntime, RunState, RuntimeLimits
 from coding_agent.tooling import PreparedToolCall, ToolExecutionResult, ToolRegistry
 from coding_agent.workspace import WorkspacePathResolver
@@ -126,15 +126,15 @@ def test_read_file_tool_loop_reaches_final_response(tmp_path: Path) -> None:
     assert tool_result.call_id == "call-read"
     assert tool_result.tool_name == "read_file"
     assert tool_result.outcome is ToolOutcome.SUCCESS
-    assert tool_result.content == ReadFileContent(
-        path="main.py",
-        start_line=1,
-        end_line=1,
-        total_lines=1,
-        content="1 | print('hello')",
-        truncated=False,
-        next_start_line=None,
-    )
+    assert tool_result.content == {
+        "path": "main.py",
+        "start_line": 1,
+        "end_line": 1,
+        "total_lines": 1,
+        "content": "1 | print('hello')",
+        "truncated": False,
+        "next_start_line": None,
+    }
     assert client.requests[0].tools[0].name == "read_file"
     assert client.requests[1].messages == request_messages
 

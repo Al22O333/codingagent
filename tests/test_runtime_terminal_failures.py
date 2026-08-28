@@ -36,7 +36,7 @@ class ExplodingPolicyEngine(PolicyEngine):
 
 
 class ExplodingContextManager(ContextManager):
-    def build_messages(self, additional_messages=()):  # type: ignore[no-untyped-def]
+    def build_model_messages(self, **kwargs):  # type: ignore[no-untyped-def]
         raise RuntimeError("context boom")
 
 

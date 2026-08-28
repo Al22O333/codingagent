@@ -10,6 +10,7 @@ from .protocol import (
     UserMessage,
 )
 from .prompt import build_system_prefix
+from .projection import project_tool_result_message
 
 
 class ContextOrderError(ValueError):
@@ -117,21 +118,35 @@ class ContextManager:
         additional_messages: tuple[InternalMessage, ...] = (),
     ) -> tuple[InternalMessage, ...]:
         """Build a bounded snapshot without splitting ToolCall/ToolResult groups."""
+        return self._build_bounded_messages(
+            additional_messages,
+            project_tool_results=False,
+        )
+
+    def _build_bounded_messages(
+        self,
+        additional_messages: tuple[InternalMessage, ...],
+        *,
+        project_tool_results: bool,
+    ) -> tuple[InternalMessage, ...]:
+        """Evict whole raw units using their eventual model-visible size."""
         continuity = list(self._completed_run_continuity)
         current_units = self._current_message_units()
         additional_units = [(message,) for message in additional_messages]
 
-        while continuity and self._units_size(
-            [*continuity, *current_units, *additional_units]
-        ) > self._max_context_chars:
+        def visible_units() -> list[tuple[InternalMessage, ...]]:
+            units = [*continuity, *current_units, *additional_units]
+            if not project_tool_results:
+                return units
+            return [self._project_unit(unit) for unit in units]
+
+        while continuity and self._units_size(visible_units()) > self._max_context_chars:
             continuity.pop(0)
             self._history_incomplete = True
 
         protected = self._protected_current_unit_indexes(current_units)
         index = 0
-        while self._units_size(
-            [*continuity, *current_units, *additional_units]
-        ) > self._max_context_chars:
+        while self._units_size(visible_units()) > self._max_context_chars:
             while index < len(current_units) and index in protected:
                 index += 1
             if index >= len(current_units):
@@ -150,9 +165,10 @@ class ContextManager:
 
         self._completed_run_continuity = continuity
         self._messages = [message for unit in current_units for message in unit]
+        result_units = visible_units()
         return tuple(
             message
-            for unit in [*continuity, *current_units, *additional_units]
+            for unit in result_units
             for message in unit
         )
 
@@ -170,15 +186,32 @@ class ContextManager:
             corrective_instruction=corrective_instruction,
         )
         previously_incomplete = self._history_incomplete
-        messages_with_tail_prefix = self.build_messages((prefix,))
+        messages_with_tail_prefix = self._build_bounded_messages(
+            (prefix,),
+            project_tool_results=True,
+        )
         if not previously_incomplete and self._history_incomplete:
             prefix = build_system_prefix(
                 history_incomplete=True,
                 repeated_action_warning=repeated_action_warning,
                 corrective_instruction=corrective_instruction,
             )
-            messages_with_tail_prefix = self.build_messages((prefix,))
+            messages_with_tail_prefix = self._build_bounded_messages(
+                (prefix,),
+                project_tool_results=True,
+            )
         return (prefix, *messages_with_tail_prefix[:-1])
+
+    @staticmethod
+    def _project_unit(
+        unit: tuple[InternalMessage, ...],
+    ) -> tuple[InternalMessage, ...]:
+        return tuple(
+            project_tool_result_message(message)
+            if isinstance(message, ToolResultMessage)
+            else message
+            for message in unit
+        )
 
     def _completed_run_summary(self) -> tuple[InternalMessage, ...] | None:
         if not self._messages or not isinstance(self._messages[0], UserMessage):
