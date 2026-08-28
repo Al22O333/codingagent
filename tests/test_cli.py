@@ -461,6 +461,93 @@ def test_normal_tool_activity_hides_internal_requested_placeholder() -> None:
     assert lines == ("● 查找文件",)
 
 
+def test_activity_writer_groups_by_observable_tool_family_and_resets_per_run() -> None:
+    output = StringIO()
+    report = cli._event_writer(output)
+
+    report(RuntimeEvent("run_started", {"run_id": "one"}))
+    report(
+        RuntimeEvent(
+            "tool_proposed",
+            {"call_id": "read-1", "tool_name": "read_file", "action": "a.py"},
+        )
+    )
+    report(
+        RuntimeEvent(
+            "tool_proposed",
+            {"call_id": "read-2", "tool_name": "search_text", "action": "token"},
+        )
+    )
+    report(
+        RuntimeEvent(
+            "tool_proposed",
+            {"call_id": "edit", "tool_name": "edit_file", "action": "a.py"},
+        )
+    )
+    report(
+        RuntimeEvent(
+            "tool_proposed",
+            {"call_id": "test", "tool_name": "shell", "action": "pytest -q"},
+        )
+    )
+    report(
+        RuntimeEvent(
+            "tool_proposed",
+            {"call_id": "command", "tool_name": "shell", "action": "git status"},
+        )
+    )
+    report(RuntimeEvent("run_started", {"run_id": "two"}))
+    report(
+        RuntimeEvent(
+            "tool_proposed",
+            {"call_id": "read-3", "tool_name": "read_file", "action": "b.py"},
+        )
+    )
+
+    rendered = output.getvalue()
+    assert rendered.count("◆ 查看项目") == 2
+    assert rendered.count("◆ 修改文件") == 1
+    assert rendered.count("◆ 测试与检查") == 1
+    assert rendered.count("◆ 执行命令") == 1
+    assert "● 运行测试" in rendered
+    assert "● 执行本地命令" in rendered
+
+
+def test_debug_shell_rendering_keeps_bounded_command_tail_and_diagnostic() -> None:
+    command = "python " + "x" * 1_200 + " COMMAND_TAIL"
+    diagnostic = "OUTPUT_HEAD " + "y" * 2_000 + " OUTPUT_TAIL"
+    proposal = cli._render_event(
+        RuntimeEvent(
+            "tool_proposed",
+            {"call_id": "shell", "tool_name": "shell", "action": command},
+        ),
+        debug=True,
+    )
+    result = cli._render_event(
+        RuntimeEvent(
+            "tool_result",
+            {
+                "call_id": "shell",
+                "outcome": "UNSUCCESSFUL_COMMAND",
+                "exit_code": 1,
+                "diagnostic": diagnostic,
+            },
+        ),
+        debug=True,
+        proposed_actions={"shell": ("shell", command)},
+    )
+
+    rendered_proposal = "\n".join(proposal)
+    rendered_result = "\n".join(result)
+    assert "[调试] command=" in rendered_proposal
+    assert "COMMAND_TAIL" in rendered_proposal
+    assert len(rendered_proposal) < 1_500
+    assert "[调试] diagnostic=" in rendered_result
+    assert "OUTPUT_HEAD" in rendered_result
+    assert "OUTPUT_TAIL" in rendered_result
+    assert len(rendered_result) < 3_000
+
+
 def test_normal_hides_usage_while_debug_shows_only_normalized_usage(
     tmp_path: Path,
 ) -> None:

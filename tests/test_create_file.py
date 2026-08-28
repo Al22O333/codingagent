@@ -14,6 +14,15 @@ from coding_agent.tooling import PreparedToolCall
 from coding_agent.workspace import WorkspacePathResolver
 
 
+def test_tool_description_is_explicitly_create_only(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    description = CreateFileTool(WorkspacePathResolver(workspace)).spec.description
+
+    assert "known not to exist" in description
+    assert "never use it to replace an existing file" in description
+
+
 def test_create_file_writes_utf8_and_reports_bytes(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

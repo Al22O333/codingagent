@@ -37,6 +37,13 @@ LIMITS = RuntimeLimits(
 )
 
 
+def test_tool_description_names_unresolved_product_choices() -> None:
+    description = AskUserTool().spec.description
+
+    assert "material product choice" in description
+    assert "cannot be resolved from the workspace" in description
+
+
 class ExplodingPolicyEngine(PolicyEngine):
     def check_explicit_constraints(self, prepared_call, snapshot):  # type: ignore[no-untyped-def]
         raise AssertionError("Interaction Tool entered Explicit Constraint policy")

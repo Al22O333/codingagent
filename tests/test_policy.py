@@ -252,6 +252,22 @@ def test_ambiguous_complex_shell_confirms_but_simple_unknown_allows(
     assert simple_result.decision is PermissionDecision.ALLOW
 
 
+def test_quoted_python_statement_separators_do_not_require_confirmation(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    prepared = _prepare(
+        _shell_tool(WorkspacePathResolver(workspace)),
+        "python-check",
+        ShellArguments(command='python -c "value=1; print(value)"'),
+    )
+
+    result = PolicyEngine().check_risk_permission(prepared)
+
+    assert result.decision is PermissionDecision.ALLOW
+
+
 def test_constraint_and_risk_results_remain_separate(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

@@ -128,13 +128,21 @@ _SAFE_EXECUTABLES = frozenset(
 def classify_shell_surface(command: str) -> ShellSurfaceFacts:
     """Recognize common risk-relevant command surface without parsing a shell AST."""
     actions: set[ShellRiskAction] = set()
-    has_compound_syntax = bool(_COMPOUND_SYNTAX.search(command))
-    has_unknown_segment = bool(_AMBIGUOUS_COMPOSITION.search(command))
+    surface_command = _mask_quoted_metacharacters(command)
+    nested_shell = _is_nested_shell_invocation(command)
+    has_compound_syntax = bool(_COMPOUND_SYNTAX.search(surface_command)) or (
+        nested_shell and bool(_COMPOUND_SYNTAX.search(command))
+    )
+    has_unknown_segment = bool(_AMBIGUOUS_COMPOSITION.search(surface_command)) or (
+        nested_shell and bool(_AMBIGUOUS_COMPOSITION.search(command))
+    )
 
     if re.search(r"(?<!&)&\s*$", command):
         actions.add(ShellRiskAction.BACKGROUND_OR_DETACHED_PROCESS)
 
-    segments = [segment.strip() for segment in _SEGMENT_SEPARATOR.split(command)]
+    segments = [
+        segment.strip() for segment in _SEGMENT_SEPARATOR.split(surface_command)
+    ]
     for segment in segments:
         if not segment:
             has_unknown_segment = True
@@ -148,6 +156,60 @@ def classify_shell_surface(command: str) -> ShellSurfaceFacts:
         recognized_actions=frozenset(actions),
         has_compound_syntax=has_compound_syntax,
         has_unknown_segment=has_unknown_segment,
+    )
+
+
+def _mask_quoted_metacharacters(command: str) -> str:
+    """Mask literal shell metacharacters inside quotes without parsing a shell AST."""
+
+    rendered: list[str] = []
+    quote: str | None = None
+    escaped = False
+    index = 0
+    while index < len(command):
+        character = command[index]
+        if quote is None:
+            rendered.append(character)
+            if character in {'"', "'"}:
+                quote = character
+            index += 1
+            continue
+
+        if escaped:
+            rendered.append(character)
+            escaped = False
+            index += 1
+            continue
+        if quote == '"' and character == "\\":
+            rendered.append(character)
+            escaped = True
+            index += 1
+            continue
+        if character == quote:
+            rendered.append(character)
+            quote = None
+            index += 1
+            continue
+        if quote == '"' and character == "$" and command[index : index + 2] == "$(":
+            rendered.extend("$(")
+            index += 2
+            continue
+        if quote == '"' and character == "`":
+            rendered.append(character)
+            index += 1
+            continue
+        rendered.append(" " if character in "|;<>&()\r\n" else character)
+        index += 1
+    return "".join(rendered)
+
+
+def _is_nested_shell_invocation(command: str) -> bool:
+    tokens = [_unquote(token) for token in _TOKEN.findall(command)]
+    if len(tokens) < 2:
+        return False
+    executable = _command_name(tokens[0])
+    return executable in {"cmd", "powershell", "pwsh"} and any(
+        token.casefold() in {"/c", "-c", "-command"} for token in tokens[1:]
     )
 
 

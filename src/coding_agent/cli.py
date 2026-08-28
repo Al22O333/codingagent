@@ -234,20 +234,34 @@ def _event_writer(
     debug: bool = False,
 ) -> Callable[[RuntimeEvent], None]:
     proposed_actions: dict[str, tuple[str, str]] = {}
+    current_group: str | None = None
 
     def report(event: RuntimeEvent) -> None:
+        nonlocal current_group
         try:
             call_id = event.facts.get("call_id")
+            if event.kind == "run_started":
+                proposed_actions.clear()
+                current_group = None
+            group_heading: str | None = None
             if event.kind == "tool_proposed" and isinstance(call_id, str):
-                proposed_actions[call_id] = (
-                    str(event.facts.get("tool_name", "tool")),
-                    str(event.facts.get("action", "requested")),
-                )
+                tool_name = str(event.facts.get("tool_name", "tool"))
+                action = str(event.facts.get("action", "requested"))
+                proposed_actions[call_id] = (tool_name, action)
+                next_group = _activity_group(tool_name, action)
+                if next_group is None:
+                    current_group = None
+                elif next_group != current_group:
+                    current_group = next_group
+                    group_heading = next_group
             lines = _render_event(
                 event,
                 debug=debug,
                 proposed_actions=proposed_actions,
+                group_heading=group_heading,
             )
+            if event.kind == "tool_result" and isinstance(call_id, str):
+                proposed_actions.pop(call_id, None)
             for line in lines:
                 stdout.write(line[:2_000] + "\n")
             if lines:
@@ -263,12 +277,14 @@ def _render_event(
     *,
     debug: bool,
     proposed_actions: Mapping[str, tuple[str, str]] | None = None,
+    group_heading: str | None = None,
 ) -> tuple[str, ...]:
     lines: list[str] = []
     proposed_actions = proposed_actions or {}
     if event.kind == "tool_proposed":
         tool_name = str(event.facts.get("tool_name", "tool"))
-        action = str(event.facts.get("action", "requested"))[:240]
+        raw_action = str(event.facts.get("action", "requested"))
+        action = _bounded_head_tail(_single_line(raw_action), 240)
         labels = {
             "list_directory": "查看目录",
             "search_files": "查找文件",
@@ -279,6 +295,10 @@ def _render_event(
             "shell": "执行本地命令",
             "ask_user": "请求补充信息",
         }
+        if tool_name == "shell":
+            labels[tool_name] = _shell_action_label(raw_action)
+        if group_heading is not None:
+            lines.extend(("", f"◆ {group_heading}", ""))
         suffix = (
             ""
             if tool_name in {"shell", "ask_user"} or action in {"requested", "command"}
@@ -287,7 +307,8 @@ def _render_event(
         lines.append(f"● {labels.get(tool_name, tool_name)}{suffix}")
         if debug and tool_name == "shell":
             lines.append(
-                "  [调试] command=" + _bounded_head_tail(_single_line(action), 1_000)
+                "  [调试] command="
+                + _bounded_head_tail(_single_line(raw_action), 1_000)
             )
     elif event.kind == "tool_result":
         outcome = event.facts.get("outcome")
@@ -319,6 +340,12 @@ def _render_event(
             lines.append("  — 已取消本次操作")
 
     if debug:
+        diagnostic = event.facts.get("diagnostic")
+        if isinstance(diagnostic, str) and diagnostic:
+            lines.append(
+                "  [调试] diagnostic="
+                + _bounded_head_tail(_single_line(diagnostic), 1_600)
+            )
         safe_facts = " ".join(
             f"{key}={value}"
             for key, value in event.facts.items()
@@ -326,6 +353,28 @@ def _render_event(
         )
         lines.append(f"  [调试] {event.kind}{' ' + safe_facts if safe_facts else ''}")
     return tuple(lines)
+
+
+def _activity_group(tool_name: str, action: str) -> str | None:
+    if tool_name in {"list_directory", "search_files", "search_text", "read_file"}:
+        return "查看项目"
+    if tool_name in {"edit_file", "create_file"}:
+        return "修改文件"
+    if tool_name == "shell":
+        if _classify_shell_presentation(action) in {"test", "build", "check"}:
+            return "测试与检查"
+        return "执行命令"
+    if tool_name == "ask_user":
+        return None
+    return "执行操作"
+
+
+def _shell_action_label(command: str) -> str:
+    return {
+        "test": "运行测试",
+        "build": "执行构建",
+        "check": "运行检查",
+    }.get(_classify_shell_presentation(command), "执行本地命令")
 
 
 def _normal_result_detail(event: RuntimeEvent) -> str:

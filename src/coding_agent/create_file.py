@@ -40,7 +40,10 @@ class CreateFileTool(Tool[CreateFileArguments]):
     def __init__(self, resolver: WorkspacePathResolver) -> None:
         super().__init__(
             name="create_file",
-            description="Create a new UTF-8 text file without overwriting",
+            description=(
+                "Create a new UTF-8 text file only when the target is known not "
+                "to exist; never use it to replace an existing file"
+            ),
             argument_model=CreateFileArguments,
             kind=ToolKind.LOCAL,
             capabilities=frozenset({ToolCapability.FILE_MUTATION}),

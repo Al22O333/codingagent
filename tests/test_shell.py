@@ -15,8 +15,10 @@ from coding_agent.shell import (
     ShellArguments,
     ShellBackend,
     ShellContent,
+    ShellRiskAction,
     ShellTool,
     _decode_shell_output,
+    classify_shell_surface,
 )
 from coding_agent.tooling import PreparedToolCall
 from coding_agent.workspace import WorkspacePathResolver
@@ -132,6 +134,39 @@ def test_windows_cmd_native_error_is_not_mojibake(tmp_path: Path) -> None:
     diagnostic = result.content.stderr or result.content.stdout
     assert "\ufffd" not in diagnostic
     assert "<<" in diagnostic
+
+
+def test_quoted_interpreter_code_is_not_shell_compound_syntax() -> None:
+    facts = classify_shell_surface('python -c "value=1; print(value)"')
+
+    assert facts.has_compound_syntax is False
+    assert facts.has_unknown_segment is False
+    assert facts.recognized_actions == frozenset()
+
+
+def test_quote_awareness_keeps_external_compound_risk_visible() -> None:
+    facts = classify_shell_surface(
+        'python -c "value=1; print(value)" && git push origin main'
+    )
+
+    assert facts.has_compound_syntax is True
+    assert ShellRiskAction.GIT_MUTATION in facts.recognized_actions
+    assert ShellRiskAction.GIT_REMOTE_WRITE in facts.recognized_actions
+    assert ShellRiskAction.NETWORK_ACCESS in facts.recognized_actions
+
+
+def test_nested_shell_compound_content_remains_ambiguous() -> None:
+    facts = classify_shell_surface('cmd /c "echo ready && git push origin main"')
+
+    assert facts.has_compound_syntax is True
+    assert facts.has_unknown_segment is True
+
+
+def test_dynamic_substitution_inside_double_quotes_remains_ambiguous() -> None:
+    facts = classify_shell_surface('python -c "print($(whoami))"')
+
+    assert facts.has_compound_syntax is True
+    assert facts.has_unknown_segment is True
 
 
 def test_timeout_is_operation_failure_and_captures_partial_output(

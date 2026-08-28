@@ -25,7 +25,10 @@ class AskUserTool(Tool[AskUserArguments]):
     def __init__(self) -> None:
         super().__init__(
             name="ask_user",
-            description="Ask the user one question needed to continue the task.",
+            description=(
+                "Ask the user one question when a material product choice or "
+                "important ambiguity cannot be resolved from the workspace."
+            ),
             argument_model=AskUserArguments,
             kind=ToolKind.INTERACTION,
         )

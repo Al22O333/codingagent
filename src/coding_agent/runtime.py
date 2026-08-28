@@ -64,6 +64,16 @@ from .tooling import (
 from .workspace import WorkspacePathResolver
 
 
+def _bounded_observation_text(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    marker = " ...[middle omitted]... "
+    retained = max(0, limit - len(marker))
+    head = retained * 2 // 3
+    tail = retained - head
+    return value[:head] + marker + (value[-tail:] if tail else "")
+
+
 class RunState(StrEnum):
     """Top-level lifecycle states needed by the v1 runtime."""
 
@@ -105,7 +115,11 @@ class RuntimeEvent:
         bounded: dict[str, str | int | float | bool | None] = {}
         for raw_key, raw_value in list(self.facts.items())[:20]:
             key = str(raw_key)[:80]
-            value = raw_value[:2_000] if isinstance(raw_value, str) else raw_value
+            value = (
+                _bounded_observation_text(raw_value, 2_000)
+                if isinstance(raw_value, str)
+                else raw_value
+            )
             bounded[key] = value
         object.__setattr__(self, "kind", self.kind[:80])
         object.__setattr__(self, "facts", MappingProxyType(bounded))
@@ -967,7 +981,7 @@ class AgentRuntime:
             facts["exit_code"] = content.exit_code
             diagnostic = content.stderr.strip() or content.stdout.strip()
             if diagnostic:
-                facts["diagnostic"] = diagnostic[-2_000:]
+                facts["diagnostic"] = _bounded_observation_text(diagnostic, 2_000)
         self._emit("tool_result", **facts)
 
     def _emit_model_response(self, response: ModelResponse, turn: int) -> None:
@@ -1033,7 +1047,10 @@ class AgentRuntime:
         if prepared.tool_identity.name == "shell":
             command = arguments.get("command")
             return (
-                self._redact_runtime_secrets(command)[:1_000]
+                _bounded_observation_text(
+                    self._redact_runtime_secrets(command),
+                    1_000,
+                )
                 if isinstance(command, str)
                 else "local shell command"
             )
