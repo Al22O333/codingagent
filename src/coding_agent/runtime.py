@@ -13,6 +13,9 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from .ask_user import AskUserArguments
+from .create_file import CreateFileContent
+from .discovery import ListDirectoryContent, SearchFilesContent
+from .edit_file import EditFileContent
 from .constraints import (
     ConstraintDecision,
     ExplicitConstraintSnapshot,
@@ -48,6 +51,9 @@ from .protocol import (
     SystemMessage,
     UserMessage,
 )
+from .read_file import ReadFileContent
+from .search_text import SearchTextContent
+from .shell import ShellContent
 from .tooling import (
     LocalTool,
     PreparedToolCall,
@@ -99,7 +105,7 @@ class RuntimeEvent:
         bounded: dict[str, str | int | float | bool | None] = {}
         for raw_key, raw_value in list(self.facts.items())[:20]:
             key = str(raw_key)[:80]
-            value = raw_value[:200] if isinstance(raw_value, str) else raw_value
+            value = raw_value[:2_000] if isinstance(raw_value, str) else raw_value
             bounded[key] = value
         object.__setattr__(self, "kind", self.kind[:80])
         object.__setattr__(self, "facts", MappingProxyType(bounded))
@@ -202,6 +208,7 @@ class AgentRuntime:
         transport_retry_base_delay_seconds: float = 0.5,
         transport_retry_max_delay_seconds: float = 2.0,
         observer: Callable[[RuntimeEvent], object] | None = None,
+        runtime_secret_values: tuple[str, ...] = (),
     ) -> None:
         if (
             not isfinite(transport_retry_base_delay_seconds)
@@ -229,6 +236,9 @@ class AgentRuntime:
         )
         self._transport_retry_max_delay_seconds = transport_retry_max_delay_seconds
         self._observer = observer
+        self._runtime_secret_values = tuple(
+            value for value in runtime_secret_values if value
+        )
         self.session = Session()
 
     def run(self, task: str) -> AgentRun:
@@ -281,6 +291,8 @@ class AgentRuntime:
                         if agent_run.termination_reason is not None
                         else None
                     ),
+                    model_turns=agent_run.model_turns,
+                    tool_call_attempts=agent_run.tool_call_attempts,
                 )
         return agent_run
 
@@ -479,6 +491,7 @@ class AgentRuntime:
                 raise
 
             agent_run.model_turns += 1
+            self._emit_model_response(response, agent_run.model_turns)
             return response
 
     def _transport_retry_delay(self, retry_index: int) -> float:
@@ -931,13 +944,41 @@ class AgentRuntime:
         ), ends_batch=ends_batch)
 
     def _emit_tool_result(self, result: ToolResult) -> None:
-        self._emit(
-            "tool_result",
-            call_id=result.call_id,
-            tool_name=result.tool_name,
-            outcome=result.outcome.value,
-            error_code=result.error.code if result.error is not None else None,
-        )
+        facts: dict[str, str | int | float | bool | None] = {
+            "call_id": result.call_id,
+            "tool_name": result.tool_name,
+            "outcome": result.outcome.value,
+            "error_code": result.error.code if result.error is not None else None,
+        }
+        content = result.content
+        if isinstance(content, ReadFileContent):
+            facts["line_count"] = max(0, content.end_line - content.start_line + 1)
+        elif isinstance(content, ListDirectoryContent):
+            facts["result_count"] = len(content.entries)
+        elif isinstance(content, SearchFilesContent):
+            facts["result_count"] = len(content.matches)
+        elif isinstance(content, SearchTextContent):
+            facts["result_count"] = len(content.matches)
+        elif isinstance(content, EditFileContent):
+            facts["replacement_count"] = content.replacement_count
+        elif isinstance(content, CreateFileContent):
+            facts["created"] = True
+        elif isinstance(content, ShellContent):
+            facts["exit_code"] = content.exit_code
+            diagnostic = content.stderr.strip() or content.stdout.strip()
+            if diagnostic:
+                facts["diagnostic"] = diagnostic[-2_000:]
+        self._emit("tool_result", **facts)
+
+    def _emit_model_response(self, response: ModelResponse, turn: int) -> None:
+        facts: dict[str, str | int | float | bool | None] = {"model_turn": turn}
+        if response.usage is not None:
+            facts.update(
+                input_tokens=response.usage.input_tokens,
+                output_tokens=response.usage.output_tokens,
+                total_tokens=response.usage.total_tokens,
+            )
+        self._emit("model_response", **facts)
 
     def _emit(
         self,
@@ -947,10 +988,22 @@ class AgentRuntime:
         """Notify a read-only observer without granting control authority."""
         if self._observer is None:
             return
+        redacted_facts = {
+            key: self._redact_runtime_secrets(value)
+            if isinstance(value, str)
+            else value
+            for key, value in facts.items()
+        }
         try:
-            self._observer(RuntimeEvent(kind, facts))
+            self._observer(RuntimeEvent(kind, redacted_facts))
         except Exception:
             pass
+
+    def _redact_runtime_secrets(self, value: str) -> str:
+        redacted = value
+        for secret in self._runtime_secret_values:
+            redacted = redacted.replace(secret, "<redacted>")
+        return redacted
 
     @staticmethod
     def _tool_observation_summary(tool_call: ToolCall) -> str:
@@ -958,8 +1011,8 @@ class AgentRuntime:
         if not isinstance(arguments, Mapping):
             return "requested"
         if tool_call.name == "shell":
-            cwd = arguments.get("cwd")
-            return f"command in {cwd}" if isinstance(cwd, str) else "command"
+            command = arguments.get("command")
+            return command if isinstance(command, str) else "command"
         path = arguments.get("path")
         if isinstance(path, str):
             return path.replace("\r", " ").replace("\n", " ")[:200]

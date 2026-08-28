@@ -170,7 +170,9 @@ def build_runtime(
         stdin or sys.stdin,
         stdout or sys.stdout,
     )
-    observer = _event_writer(stdout) if stdout is not None else None
+    observer = (
+        _event_writer(stdout, debug=config.debug) if stdout is not None else None
+    )
     return AgentRuntime(
         concrete_model_client,
         ContextManager(max_context_chars=config.max_context_chars),
@@ -186,22 +188,89 @@ def build_runtime(
         policy_engine=PolicyEngine(),
         user_interaction=concrete_interaction,
         observer=observer,
+        runtime_secret_values=(config.api_key,),
     )
 
 
-def _event_writer(stdout: TextIO) -> Callable[[RuntimeEvent], None]:
+def _event_writer(
+    stdout: TextIO,
+    *,
+    debug: bool = False,
+) -> Callable[[RuntimeEvent], None]:
     def report(event: RuntimeEvent) -> None:
-        if event.kind != "tool_proposed":
-            return
         try:
-            stdout.write(
-                f"[tool] {event.facts['tool_name']}: {event.facts['action']}\n"
-            )
-            stdout.flush()
+            lines = _render_event(event, debug=debug)
+            for line in lines:
+                stdout.write(line[:2_000] + "\n")
+            if lines:
+                stdout.flush()
         except OSError as error:
             raise UserInteractionError("terminal activity output failed") from error
 
     return report
+
+
+def _render_event(event: RuntimeEvent, *, debug: bool) -> tuple[str, ...]:
+    lines: list[str] = []
+    if event.kind == "tool_proposed":
+        tool_name = str(event.facts.get("tool_name", "tool"))
+        action = str(event.facts.get("action", "requested"))[:240]
+        labels = {
+            "list_directory": "list",
+            "search_files": "search files",
+            "search_text": "search",
+            "read_file": "read",
+            "edit_file": "edit",
+            "create_file": "create",
+            "shell": "shell",
+            "ask_user": "clarify",
+        }
+        lines.append(f"[{labels.get(tool_name, tool_name)}] {action}")
+    elif event.kind == "tool_result":
+        outcome = event.facts.get("outcome")
+        if outcome == "SUCCESS":
+            detail = _normal_result_detail(event)
+            lines.append(f"✓ {detail}")
+        elif outcome == "UNSUCCESSFUL_COMMAND":
+            exit_code = event.facts.get("exit_code")
+            lines.append(f"✗ exit {exit_code}")
+            diagnostic = event.facts.get("diagnostic")
+            if isinstance(diagnostic, str) and diagnostic:
+                lines.append(diagnostic[-1_200:])
+        elif outcome != "NOT_EXECUTED":
+            code = event.facts.get("error_code") or outcome
+            lines.append(f"✗ {code}")
+    elif event.kind == "context_truncated":
+        lines.append("[context] older working history was trimmed")
+    elif event.kind == "budget_exhausted":
+        lines.append(f"Run stopped: {event.facts.get('limit')} reached.")
+
+    if debug:
+        safe_facts = " ".join(
+            f"{key}={value}"
+            for key, value in event.facts.items()
+            if key not in {"action", "diagnostic"} and value is not None
+        )
+        lines.append(f"[debug] {event.kind}{' ' + safe_facts if safe_facts else ''}")
+    return tuple(lines)
+
+
+def _normal_result_detail(event: RuntimeEvent) -> str:
+    facts = event.facts
+    if facts.get("replacement_count") is not None:
+        return f"replaced {facts['replacement_count']} occurrence(s)"
+    if facts.get("created"):
+        return "created"
+    if facts.get("line_count") is not None:
+        return f"{facts['line_count']} line(s)"
+    if facts.get("result_count") is not None:
+        return f"{facts['result_count']} result(s)"
+    if facts.get("exit_code") is not None:
+        diagnostic = facts.get("diagnostic")
+        if isinstance(diagnostic, str) and diagnostic:
+            return diagnostic[-500:]
+        return f"exit {facts['exit_code']}"
+    return "completed"
 
 
 def _parser() -> argparse.ArgumentParser:

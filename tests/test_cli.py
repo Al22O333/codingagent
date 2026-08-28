@@ -23,7 +23,7 @@ from coding_agent.interaction import (
 )
 from coding_agent.model_client import FakeModelClient
 from coding_agent.model_client import FatalProviderError
-from coding_agent.protocol import ModelResponse, ToolCall, ToolOutcome
+from coding_agent.protocol import ModelResponse, ModelUsage, ToolCall, ToolOutcome
 from coding_agent.runtime import RunState
 
 
@@ -373,9 +373,71 @@ def test_cli_shows_sanitized_tool_activity_without_arguments_or_secrets(
     cli._run_task(runtime, "Inspect the project", output)
 
     rendered = output.getvalue()
-    assert "[tool] edit_file: src/main.py" in rendered
+    assert "[edit] src/main.py" in rendered
     assert secret not in rendered
     assert "replacement" not in rendered
+
+
+def test_normal_hides_usage_while_debug_shows_only_normalized_usage(
+    tmp_path: Path,
+) -> None:
+    usage = ModelUsage(input_tokens=10, output_tokens=5, total_tokens=15)
+    normal_output = StringIO()
+    normal_runtime = build_runtime(
+        _config(tmp_path),
+        model_client=FakeModelClient([ModelResponse("Done.", usage=usage)]),
+        user_interaction=FakeUserInteraction(),
+        stdout=normal_output,
+    )
+    cli._run_task(normal_runtime, "Inspect", normal_output)
+
+    debug_output = StringIO()
+    debug_config = CLIConfig(
+        workspace=tmp_path,
+        model="test-model",
+        base_url="https://provider.invalid/v1",
+        api_key="test-key",
+        debug=True,
+    )
+    debug_runtime = build_runtime(
+        debug_config,
+        model_client=FakeModelClient([ModelResponse("Done.", usage=usage)]),
+        user_interaction=FakeUserInteraction(),
+        stdout=debug_output,
+    )
+    cli._run_task(debug_runtime, "Inspect", debug_output)
+
+    assert "input_tokens" not in normal_output.getvalue()
+    rendered_debug = debug_output.getvalue()
+    assert "input_tokens=10" in rendered_debug
+    assert "output_tokens=5" in rendered_debug
+    assert "total_tokens=15" in rendered_debug
+    assert "raw" not in rendered_debug
+
+
+def test_shell_rendering_is_bounded_and_redacts_runtime_credential(
+    tmp_path: Path,
+) -> None:
+    secret = "test-key"
+    output = StringIO()
+    command = _python_command(f"print({secret!r} + 'x' * 10000)")
+    call = ToolCall("shell-secret", "shell", {"command": command})
+    runtime = build_runtime(
+        _config(tmp_path),
+        model_client=FakeModelClient(
+            [ModelResponse(None, (call,)), ModelResponse("Done.")]
+        ),
+        user_interaction=FakeUserInteraction(),
+        stdout=output,
+    )
+
+    cli._run_task(runtime, "Run the check", output)
+
+    rendered = output.getvalue()
+    assert "[shell]" in rendered
+    assert secret not in rendered
+    assert "<redacted>" in rendered
+    assert len(rendered) < 5_000
 
 
 def test_cli_provider_failure_is_understandable_and_does_not_leak_secret(

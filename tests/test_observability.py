@@ -57,13 +57,16 @@ def test_observer_receives_bounded_normalized_lifecycle_and_tool_events() -> Non
     assert run.state is RunState.COMPLETED
     assert [event.kind for event in events] == [
         "run_started",
+        "model_response",
         "tool_proposed",
         "tool_result",
+        "model_response",
         "run_terminal",
     ]
     assert secret not in repr(events)
     assert all(len(repr(event)) < 2_000 for event in events)
-    assert events[2].facts["outcome"] == "VALIDATION_ERROR"
+    tool_result = next(event for event in events if event.kind == "tool_result")
+    assert tool_result.facts["outcome"] == "VALIDATION_ERROR"
 
 
 def test_observer_exception_is_isolated_from_runtime_semantics() -> None:
