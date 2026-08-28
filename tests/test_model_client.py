@@ -1,4 +1,4 @@
-"""Unit tests for the Step 3 ModelClient seam and fake."""
+"""Unit tests for the ModelClient seam and fake."""
 
 import pytest
 

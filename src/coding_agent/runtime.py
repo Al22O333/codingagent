@@ -268,10 +268,13 @@ class AgentRuntime:
             if self._model_budget_exhausted(agent_run, run_started_at):
                 return agent_run
 
-            additional_messages = (
-                (corrective_feedback,) if corrective_feedback is not None else ()
+            messages = self._context_manager.build_model_messages(
+                corrective_instruction=(
+                    corrective_feedback.text
+                    if corrective_feedback is not None
+                    else None
+                )
             )
-            messages = self._context_manager.build_messages(additional_messages)
             request = ModelRequest(
                 messages=messages,
                 tools=self._tool_registry.specs(),

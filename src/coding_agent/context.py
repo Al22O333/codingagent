@@ -9,6 +9,7 @@ from .protocol import (
     ToolResultMessage,
     UserMessage,
 )
+from .prompt import build_system_prefix
 
 
 class ContextOrderError(ValueError):
@@ -154,6 +155,30 @@ class ContextManager:
             for unit in [*continuity, *current_units, *additional_units]
             for message in unit
         )
+
+    def build_model_messages(
+        self,
+        *,
+        repeated_action_warning: str | None = None,
+        corrective_instruction: str | None = None,
+    ) -> tuple[InternalMessage, ...]:
+        """Build a bounded snapshot with one request-local system prefix."""
+
+        prefix = build_system_prefix(
+            history_incomplete=self._history_incomplete,
+            repeated_action_warning=repeated_action_warning,
+            corrective_instruction=corrective_instruction,
+        )
+        previously_incomplete = self._history_incomplete
+        messages_with_tail_prefix = self.build_messages((prefix,))
+        if not previously_incomplete and self._history_incomplete:
+            prefix = build_system_prefix(
+                history_incomplete=True,
+                repeated_action_warning=repeated_action_warning,
+                corrective_instruction=corrective_instruction,
+            )
+            messages_with_tail_prefix = self.build_messages((prefix,))
+        return (prefix, *messages_with_tail_prefix[:-1])
 
     def _completed_run_summary(self) -> tuple[InternalMessage, ...] | None:
         if not self._messages or not isinstance(self._messages[0], UserMessage):

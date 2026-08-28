@@ -1,4 +1,4 @@
-"""Step 0 smoke tests."""
+"""Package and CLI smoke tests."""
 
 import coding_agent
 from coding_agent.cli import STARTUP_MESSAGE

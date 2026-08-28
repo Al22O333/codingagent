@@ -1,4 +1,4 @@
-"""Unit tests for the Step 2 tool abstraction and registry."""
+"""Unit tests for the Tool abstraction and registry."""
 
 from typing import cast
 

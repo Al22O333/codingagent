@@ -1,4 +1,4 @@
-"""Unit tests for the Step 1 provider-neutral protocol objects."""
+"""Unit tests for provider-neutral protocol objects."""
 
 from dataclasses import FrozenInstanceError
 

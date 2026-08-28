@@ -1,4 +1,4 @@
-"""Tests for Step 10 runtime budgets and model recovery semantics."""
+"""Tests for runtime budgets and model recovery semantics."""
 
 from __future__ import annotations
 
@@ -210,8 +210,9 @@ def test_invalid_response_consumes_turn_and_corrective_response_consumes_another
         UserMessage("Complete the task"),
         AssistantMessage(text="Corrected final."),
     )
-    assert isinstance(client.requests[1].messages[-1], SystemMessage)
-    assert "previous response was invalid" in client.requests[1].messages[-1].text
+    assert isinstance(client.requests[1].messages[0], SystemMessage)
+    assert "previous response was invalid" in client.requests[1].messages[0].text
+    assert client.requests[1].messages[-1] == UserMessage("Complete the task")
 
 
 def test_model_client_protocol_error_uses_corrective_reprompt() -> None:

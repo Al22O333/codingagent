@@ -114,7 +114,7 @@ def _runtime(
 
 
 def _first_results(client: FakeModelClient) -> tuple:
-    message = client.requests[1].messages[2]
+    message = client.requests[1].messages[3]
     assert isinstance(message, ToolResultMessage)
     return message.results
 

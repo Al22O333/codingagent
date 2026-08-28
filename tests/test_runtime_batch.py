@@ -1,4 +1,4 @@
-"""Tests for Step 9 sequential multi-tool batch semantics."""
+"""Tests for sequential multi-tool batch semantics."""
 
 from __future__ import annotations
 
@@ -81,7 +81,7 @@ def test_batch_fail_stop_preserves_correspondence_and_attempt_count(
 
     run = runtime.run("Inspect three files")
 
-    result_message = client.requests[1].messages[2]
+    result_message = client.requests[1].messages[3]
     assert isinstance(result_message, ToolResultMessage)
     results = result_message.results
     assert [result.call_id for result in results] == [
@@ -144,7 +144,7 @@ def test_validation_failure_stops_before_later_call_validation(
 
     run = runtime.run("Read later.py")
 
-    results = client.requests[1].messages[2].results  # type: ignore[union-attr]
+    results = client.requests[1].messages[3].results  # type: ignore[union-attr]
     assert [result.outcome for result in results] == [
         ToolOutcome.VALIDATION_ERROR,
         ToolOutcome.NOT_EXECUTED,

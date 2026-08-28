@@ -1,4 +1,4 @@
-"""Integration tests for the Step 8 single-ToolCall runtime loop."""
+"""Integration tests for the single-ToolCall runtime loop."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from coding_agent.policy import PolicyEngine
 from coding_agent.protocol import (
     AssistantMessage,
     ModelResponse,
+    SystemMessage,
     ToolCall,
     ToolOutcome,
     ToolResultMessage,
@@ -115,12 +116,13 @@ def test_read_file_tool_loop_reaches_final_response(tmp_path: Path) -> None:
         AssistantMessage(text="The file prints hello."),
     )
     request_messages = client.requests[1].messages
-    assert request_messages[0] == UserMessage("Inspect main.py")
-    assert request_messages[1] == AssistantMessage(
+    assert isinstance(request_messages[0], SystemMessage)
+    assert request_messages[1] == UserMessage("Inspect main.py")
+    assert request_messages[2] == AssistantMessage(
         text="I will inspect it.", tool_calls=(tool_call,)
     )
-    assert isinstance(request_messages[2], ToolResultMessage)
-    tool_result = request_messages[2].results[0]
+    assert isinstance(request_messages[3], ToolResultMessage)
+    tool_result = request_messages[3].results[0]
     assert tool_result.call_id == "call-read"
     assert tool_result.tool_name == "read_file"
     assert tool_result.outcome is ToolOutcome.SUCCESS
@@ -153,7 +155,7 @@ def test_unknown_tool_returns_validation_observation_then_continues(
 
     run = runtime.run("Inspect files")
 
-    result = client.requests[1].messages[2].results[0]  # type: ignore[union-attr]
+    result = client.requests[1].messages[3].results[0]  # type: ignore[union-attr]
     assert result.call_id == "unknown-1"
     assert result.outcome is ToolOutcome.VALIDATION_ERROR
     assert result.error is not None and result.error.code == "UNKNOWN_TOOL"
@@ -179,7 +181,7 @@ def test_invalid_arguments_return_validation_observation(tmp_path: Path) -> None
 
     run = runtime.run("Inspect main.py")
 
-    result = client.requests[1].messages[2].results[0]  # type: ignore[union-attr]
+    result = client.requests[1].messages[3].results[0]  # type: ignore[union-attr]
     assert result.call_id == "invalid-1"
     assert result.outcome is ToolOutcome.VALIDATION_ERROR
     assert result.error is not None and result.error.code == "INVALID_ARGUMENTS"
@@ -204,7 +206,7 @@ def test_preparation_failure_becomes_runtime_tool_result(tmp_path: Path) -> None
 
     run = runtime.run("Inspect missing.py")
 
-    result = client.requests[1].messages[2].results[0]  # type: ignore[union-attr]
+    result = client.requests[1].messages[3].results[0]  # type: ignore[union-attr]
     assert result.call_id == "missing-1"
     assert result.outcome is ToolOutcome.OPERATION_FAILURE
     assert result.error is not None and result.error.code == "FILE_NOT_FOUND"
@@ -231,7 +233,7 @@ def test_workspace_boundary_is_rejected_without_execution(tmp_path: Path) -> Non
 
     runtime.run("Inspect outside file")
 
-    result = client.requests[1].messages[2].results[0]  # type: ignore[union-attr]
+    result = client.requests[1].messages[3].results[0]  # type: ignore[union-attr]
     assert result.outcome is ToolOutcome.POLICY_REJECTED
     assert result.error is not None and result.error.code == "WORKSPACE_BOUNDARY"
     assert "secret" not in repr(result.content)
@@ -259,7 +261,7 @@ def test_sensitive_path_rejection_does_not_execute(
 
     runtime.run("Inspect .env")
 
-    result = client.requests[1].messages[2].results[0]  # type: ignore[union-attr]
+    result = client.requests[1].messages[3].results[0]  # type: ignore[union-attr]
     assert result.outcome is ToolOutcome.POLICY_REJECTED
     assert result.error is not None
     assert result.error.code == "USER_REJECTED_CONFIRMATION"

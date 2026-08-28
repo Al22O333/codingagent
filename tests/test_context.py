@@ -5,11 +5,16 @@ import pytest
 from coding_agent.context import ContextLimitError, ContextManager, ContextOrderError
 from coding_agent.protocol import (
     AssistantMessage,
+    SystemMessage,
     ToolCall,
     ToolOutcome,
     ToolResult,
     ToolResultMessage,
     UserMessage,
+)
+from coding_agent.prompt import (
+    BASE_SYSTEM_PROMPT,
+    CONTEXT_TRUNCATION_NOTICE,
 )
 
 
@@ -262,6 +267,36 @@ def test_history_incomplete_resets_only_at_next_run_start() -> None:
 
     context.start_run(UserMessage("Next task"))
     assert context.history_incomplete is False
+
+
+def test_effective_system_prefix_is_request_local_and_deterministically_ordered() -> None:
+    context = ContextManager()
+    context.start_run(UserMessage("Task"))
+
+    messages = context.build_model_messages(
+        repeated_action_warning="REPEAT_WARNING",
+        corrective_instruction="CORRECTIVE_INSTRUCTION",
+    )
+
+    assert isinstance(messages[0], SystemMessage)
+    prefix = messages[0].text
+    assert prefix.startswith(BASE_SYSTEM_PROMPT)
+    assert prefix.index("REPEAT_WARNING") < prefix.index("CORRECTIVE_INSTRUCTION")
+    assert prefix.endswith("CORRECTIVE_INSTRUCTION")
+    assert context.build_messages() == (UserMessage("Task"),)
+
+
+def test_context_notice_is_added_after_destructive_eviction() -> None:
+    context = ContextManager(max_context_chars=len(BASE_SYSTEM_PROMPT) + 500)
+    context.start_run(UserMessage("Task"))
+    context.record_assistant_message(AssistantMessage("x" * 1_000))
+
+    messages = context.build_model_messages()
+
+    assert context.history_incomplete is True
+    assert isinstance(messages[0], SystemMessage)
+    assert CONTEXT_TRUNCATION_NOTICE in messages[0].text
+    assert CONTEXT_TRUNCATION_NOTICE not in repr(context.build_messages())
 
 
 def _tool_result_with_text(call_id: str, text: str) -> ToolResult:

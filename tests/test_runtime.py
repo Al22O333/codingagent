@@ -1,4 +1,4 @@
-"""Tests for the Step 5 model-to-final AgentRuntime slice."""
+"""AgentRuntime lifecycle and model-turn tests."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from coding_agent.protocol import (
     AssistantMessage,
     ModelRequest,
     ModelResponse,
+    SystemMessage,
     ToolCall,
     ToolOutcome,
     UserMessage,
@@ -67,7 +68,8 @@ def test_valid_final_response_completes_run() -> None:
     assert run.termination_reason is None
     assert run.last_error is None
     assert runtime.session.runs == (run,)
-    assert client.requests[0].messages == (UserMessage("Complete the task"),)
+    assert isinstance(client.requests[0].messages[0], SystemMessage)
+    assert client.requests[0].messages[1:] == (UserMessage("Complete the task"),)
     assert context.build_messages() == (
         UserMessage("Complete the task"),
         AssistantMessage(text="Task completed."),
@@ -120,7 +122,8 @@ def test_session_keeps_sequential_runs_and_conversation_continuity() -> None:
 
     assert runtime.session.runs == (first, second)
     assert first.run_id != second.run_id
-    assert client.requests[1].messages == (
+    assert isinstance(client.requests[1].messages[0], SystemMessage)
+    assert client.requests[1].messages[1:] == (
         UserMessage("First task"),
         AssistantMessage(text="First final."),
         UserMessage("Second task"),
@@ -172,7 +175,8 @@ def test_second_run_does_not_receive_stale_tool_observation(
     assert first.state is RunState.COMPLETED
     assert second.state is RunState.COMPLETED
     second_request = client.requests[2]
-    assert second_request.messages == (
+    assert isinstance(second_request.messages[0], SystemMessage)
+    assert second_request.messages[1:] == (
         UserMessage("Read a.py"),
         AssistantMessage("First final."),
         UserMessage("Do a new task"),
@@ -269,7 +273,7 @@ def test_multiple_successful_tool_calls_are_processed_before_next_turn(
 
     run = runtime.run("Inspect both files")
 
-    results = client.requests[1].messages[2].results  # type: ignore[union-attr]
+    results = client.requests[1].messages[3].results  # type: ignore[union-attr]
     assert [result.outcome for result in results] == [
         ToolOutcome.SUCCESS,
         ToolOutcome.SUCCESS,

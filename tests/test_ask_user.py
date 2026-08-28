@@ -94,7 +94,7 @@ def test_answer_becomes_single_tool_observation_and_next_model_turn() -> None:
     run = runtime.run("Find the issue")
 
     messages = client.requests[1].messages
-    result_message = messages[2]
+    result_message = messages[3]
     assert isinstance(result_message, ToolResultMessage)
     assert result_message.results[0].outcome is ToolOutcome.SUCCESS
     assert dict(result_message.results[0].content) == {"answer": "src/main.py"}
@@ -128,7 +128,7 @@ def test_answered_clarification_ends_old_batch_and_updates_trusted_constraints()
 
     run = runtime.run("Continue carefully")
 
-    result_message = client.requests[1].messages[2]
+    result_message = client.requests[1].messages[3]
     assert isinstance(result_message, ToolResultMessage)
     first, second = result_message.results
     assert first.outcome is ToolOutcome.SUCCESS
@@ -171,7 +171,7 @@ def test_blank_question_fails_validation_without_user_interaction() -> None:
 
     run = runtime.run("Find the issue")
 
-    result_message = client.requests[1].messages[2]
+    result_message = client.requests[1].messages[3]
     assert isinstance(result_message, ToolResultMessage)
     result = result_message.results[0]
     assert result.outcome is ToolOutcome.VALIDATION_ERROR

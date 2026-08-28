@@ -337,7 +337,7 @@ def test_one_shot_main_starts_runtime_and_prints_final(
     assert "Model: test-model" in output
     assert "Agent: running" in output
     assert "Finished from CLI." in output
-    assert fake.requests[0].messages[0].text == "inspect the project"  # type: ignore[union-attr]
+    assert fake.requests[0].messages[1].text == "inspect the project"  # type: ignore[union-attr]
 
 
 def test_cli_shows_sanitized_tool_activity_without_arguments_or_secrets(
