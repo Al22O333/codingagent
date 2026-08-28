@@ -25,7 +25,6 @@ from coding_agent.model_client import FakeModelClient
 from coding_agent.model_client import FatalProviderError
 from coding_agent.protocol import ModelResponse, ToolCall, ToolOutcome
 from coding_agent.runtime import RunState
-from coding_agent.shell import ShellContent
 
 
 def _config(workspace: Path) -> CLIConfig:
@@ -264,12 +263,11 @@ def test_composition_filters_runtime_secrets_but_preserves_ordinary_environment(
     result_message = client.requests[1].messages[-1]
     result = result_message.results[0]  # type: ignore[union-attr]
     assert result.outcome is ToolOutcome.SUCCESS
-    assert isinstance(result.content, ShellContent)
-    assert result.content.stdout.count("missing") == 3
-    assert "hello" in result.content.stdout
-    assert secret not in result.content.stdout
-    assert "default-agent-secret" not in result.content.stdout
-    assert "default-openai-secret" not in result.content.stdout
+    assert result.content["stdout"].count("missing") == 3  # type: ignore[index]
+    assert "hello" in result.content["stdout"]  # type: ignore[index]
+    assert secret not in result.content["stdout"]  # type: ignore[index]
+    assert "default-agent-secret" not in result.content["stdout"]  # type: ignore[index]
+    assert "default-openai-secret" not in result.content["stdout"]  # type: ignore[index]
 
 
 @pytest.mark.parametrize(

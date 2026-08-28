@@ -10,7 +10,11 @@ from coding_agent.discovery import (
     SearchFilesContent,
 )
 from coding_agent.edit_file import EditFileContent
-from coding_agent.projection import project_tool_result
+from coding_agent.projection import (
+    SHELL_OMISSION_MARKER,
+    SHELL_STREAM_VISIBLE_CHARS,
+    project_tool_result,
+)
 from coding_agent.protocol import (
     AssistantMessage,
     SystemMessage,
@@ -23,6 +27,7 @@ from coding_agent.protocol import (
 )
 from coding_agent.read_file import ReadFileContent
 from coding_agent.search_text import SearchTextContent, TextMatch
+from coding_agent.shell import ShellContent
 
 
 def _result(tool_name: str, content: object) -> ToolResult:
@@ -127,3 +132,70 @@ def test_projection_precedes_global_eviction_without_mutating_internal_history()
     assert isinstance(visible[-1], ToolResultMessage)
     assert len(visible[-1].results[0].error.message) == 1_000  # type: ignore[union-attr]
     assert context._messages[-1] == ToolResultMessage((raw_result,))
+
+
+def test_shell_projection_preserves_short_independent_streams_and_outcome() -> None:
+    projected = project_tool_result(
+        ToolResult(
+            "shell-1",
+            "shell",
+            ToolOutcome.UNSUCCESSFUL_COMMAND,
+            content=ShellContent(
+                "pytest",
+                ".",
+                1,
+                "one failed",
+                "warning",
+                False,
+                False,
+            ),
+        )
+    )
+
+    assert projected.outcome is ToolOutcome.UNSUCCESSFUL_COMMAND
+    assert projected.content == {
+        "exit_code": 1,
+        "stdout": "one failed",
+        "stderr": "warning",
+        "stdout_truncated": False,
+        "stderr_truncated": False,
+    }
+
+
+def test_shell_projection_bounds_each_stream_with_head_marker_and_tail() -> None:
+    stdout = "OUT-HEAD" + "x" * 12_000 + "OUT-TAIL"
+    stderr = "ERR-HEAD" + "y" * 12_000 + "ERR-TAIL"
+    projected = project_tool_result(
+        _result(
+            "shell",
+            ShellContent("command", ".", 0, stdout, stderr, False, True),
+        )
+    )
+
+    projected_stdout = projected.content["stdout"]  # type: ignore[index]
+    projected_stderr = projected.content["stderr"]  # type: ignore[index]
+    assert len(projected_stdout) == SHELL_STREAM_VISIBLE_CHARS
+    assert len(projected_stderr) == SHELL_STREAM_VISIBLE_CHARS
+    assert projected_stdout.startswith("OUT-HEAD")
+    assert projected_stdout.endswith("OUT-TAIL")
+    assert projected_stderr.startswith("ERR-HEAD")
+    assert projected_stderr.endswith("ERR-TAIL")
+    assert SHELL_OMISSION_MARKER in projected_stdout
+    assert SHELL_OMISSION_MARKER in projected_stderr
+    assert projected.content["stdout_truncated"] is True  # type: ignore[index]
+    assert projected.content["stderr_truncated"] is True  # type: ignore[index]
+
+
+def test_shell_operation_failure_outcome_is_not_changed_by_projection() -> None:
+    projected = project_tool_result(
+        ToolResult(
+            "shell-failure",
+            "shell",
+            ToolOutcome.OPERATION_FAILURE,
+            content=ShellContent("bad", ".", None, "", "failed", False, False),
+            error=ToolError("PROCESS_START_FAILED", "could not start"),
+        )
+    )
+
+    assert projected.outcome is ToolOutcome.OPERATION_FAILURE
+    assert projected.content["exit_code"] is None  # type: ignore[index]

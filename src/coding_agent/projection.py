@@ -13,6 +13,11 @@ from .search_text import (
     DEFAULT_MODEL_PROJECTION_CHARS,
     SearchTextContent,
 )
+from .shell import ShellContent
+
+
+SHELL_STREAM_VISIBLE_CHARS = 8_000
+SHELL_OMISSION_MARKER = "\n\n[... output truncated; omitted content not shown ...]\n\n"
 
 
 def project_tool_result_message(message: ToolResultMessage) -> ToolResultMessage:
@@ -96,9 +101,41 @@ def _project_content(tool_name: str, content: object | None) -> object | None:
             "path": content.path,
             "bytes_written": content.bytes_written,
         }
+    if isinstance(content, ShellContent):
+        stdout, stdout_truncated = _project_shell_stream(
+            content.stdout,
+            content.stdout_truncated,
+        )
+        stderr, stderr_truncated = _project_shell_stream(
+            content.stderr,
+            content.stderr_truncated,
+        )
+        return {
+            "exit_code": content.exit_code,
+            "stdout": stdout,
+            "stderr": stderr,
+            "stdout_truncated": stdout_truncated,
+            "stderr_truncated": stderr_truncated,
+        }
     if isinstance(content, Mapping):
         return _bounded_mapping(content)
     return content
+
+
+def _project_shell_stream(value: str, already_truncated: bool) -> tuple[str, bool]:
+    truncated = already_truncated or len(value) > SHELL_STREAM_VISIBLE_CHARS
+    if not truncated:
+        return value, False
+
+    retained_chars = SHELL_STREAM_VISIBLE_CHARS - len(SHELL_OMISSION_MARKER)
+    head_chars = retained_chars // 2
+    tail_chars = retained_chars - head_chars
+    projected = (
+        value[:head_chars]
+        + SHELL_OMISSION_MARKER
+        + (value[-tail_chars:] if tail_chars else "")
+    )
+    return projected, True
 
 
 def _project_error(error: ToolError | None) -> ToolError | None:
@@ -136,4 +173,9 @@ def _bounded_value(value: object | None, limit: int) -> object | None:
     return type(value).__name__
 
 
-__all__ = ["project_tool_result", "project_tool_result_message"]
+__all__ = [
+    "SHELL_OMISSION_MARKER",
+    "SHELL_STREAM_VISIBLE_CHARS",
+    "project_tool_result",
+    "project_tool_result_message",
+]
