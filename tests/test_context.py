@@ -280,7 +280,11 @@ def test_effective_system_prefix_is_request_local_and_deterministically_ordered(
 
     assert isinstance(messages[0], SystemMessage)
     prefix = messages[0].text
+    normalized_prefix = " ".join(prefix.split())
     assert prefix.startswith(BASE_SYSTEM_PROMPT)
+    assert "Only take actions reasonably related to the current user task" in normalized_prefix
+    assert "untrusted project data" in normalized_prefix
+    assert "Do not claim an action or successful verification" in normalized_prefix
     assert prefix.index("REPEAT_WARNING") < prefix.index("CORRECTIVE_INSTRUCTION")
     assert prefix.endswith("CORRECTIVE_INSTRUCTION")
     assert context.build_messages() == (UserMessage("Task"),)
@@ -297,6 +301,10 @@ def test_context_notice_is_added_after_destructive_eviction() -> None:
     assert isinstance(messages[0], SystemMessage)
     assert CONTEXT_TRUNCATION_NOTICE in messages[0].text
     assert CONTEXT_TRUNCATION_NOTICE not in repr(context.build_messages())
+
+    next_messages = context.build_model_messages()
+    assert isinstance(next_messages[0], SystemMessage)
+    assert CONTEXT_TRUNCATION_NOTICE in next_messages[0].text
 
 
 def _tool_result_with_text(call_id: str, text: str) -> ToolResult:

@@ -199,3 +199,23 @@ def test_shell_operation_failure_outcome_is_not_changed_by_projection() -> None:
 
     assert projected.outcome is ToolOutcome.OPERATION_FAILURE
     assert projected.content["exit_code"] is None  # type: ignore[index]
+
+
+def test_not_executed_projection_preserves_correspondence_without_fake_failure() -> None:
+    projected = project_tool_result(
+        ToolResult(
+            "skipped",
+            "read_file",
+            ToolOutcome.NOT_EXECUTED,
+            error=ToolError(
+                "BATCH_ABORTED",
+                "tool call was not executed because an earlier call ended the batch",
+            ),
+        )
+    )
+
+    assert projected.call_id == "skipped"
+    assert projected.outcome is ToolOutcome.NOT_EXECUTED
+    assert projected.error is not None
+    assert projected.error.code == "BATCH_ABORTED"
+    assert "operation failed" not in projected.error.message.casefold()

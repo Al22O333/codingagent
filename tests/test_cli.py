@@ -269,6 +269,9 @@ def test_composition_filters_runtime_secrets_but_preserves_ordinary_environment(
     assert secret not in result.content["stdout"]  # type: ignore[index]
     assert "default-agent-secret" not in result.content["stdout"]  # type: ignore[index]
     assert "default-openai-secret" not in result.content["stdout"]  # type: ignore[index]
+    assert secret not in repr(client.requests)
+    assert "default-agent-secret" not in repr(client.requests)
+    assert "default-openai-secret" not in repr(client.requests)
 
 
 @pytest.mark.parametrize(
@@ -354,6 +357,28 @@ def test_one_shot_main_starts_runtime_and_prints_final(
     assert "Agent: running" in output
     assert "Finished from CLI." in output
     assert fake.requests[0].messages[1].text == "inspect the project"  # type: ignore[union-attr]
+
+
+def test_invalid_workspace_fails_startup_before_model_client_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _configure_main_environment(monkeypatch)
+    constructed = False
+
+    def model_client_must_not_construct(config):  # type: ignore[no-untyped-def]
+        nonlocal constructed
+        constructed = True
+        raise AssertionError("model client constructed for invalid workspace")
+
+    monkeypatch.setattr(cli, "OpenAICompatibleModelClient", model_client_must_not_construct)
+
+    exit_code = cli.main(["--workspace", str(tmp_path / "missing"), "inspect"])
+
+    assert exit_code == 2
+    assert constructed is False
+    assert "Startup error:" in capsys.readouterr().err
 
 
 def test_cli_shows_sanitized_tool_activity_without_arguments_or_secrets(

@@ -279,6 +279,40 @@ def test_incomplete_or_unknown_finish_reason_is_protocol_error(
         client.complete(ModelRequest(messages=(UserMessage("Complete it"),)))
 
 
+@pytest.mark.parametrize(
+    "response",
+    [
+        SimpleNamespace(choices=[], usage=None),
+        SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content={"not": "text"}, tool_calls=[]),
+                    finish_reason="stop",
+                )
+            ],
+            usage=None,
+        ),
+        SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=None,
+                        tool_calls=[SimpleNamespace(id="call", function=None)],
+                    ),
+                    finish_reason="tool_calls",
+                )
+            ],
+            usage=None,
+        ),
+    ],
+)
+def test_malformed_provider_shapes_raise_protocol_error(response: object) -> None:
+    client, _ = _client(response)
+
+    with pytest.raises(ModelProtocolError):
+        client.complete(ModelRequest(messages=(UserMessage("Complete it"),)))
+
+
 def test_truncated_provider_response_cannot_complete_runtime() -> None:
     sdk = FakeSDK(
         [

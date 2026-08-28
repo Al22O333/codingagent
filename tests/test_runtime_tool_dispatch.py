@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from coding_agent.context import ContextManager
+from coding_agent.edit_file import EditFileTool
 from coding_agent.interaction import ConfirmationDecision, FakeUserInteraction
 from coding_agent.model_client import FakeModelClient
 from coding_agent.policy import PolicyEngine
@@ -266,3 +267,44 @@ def test_sensitive_path_rejection_does_not_execute(
     assert result.error is not None
     assert result.error.code == "USER_REJECTED_CONFIRMATION"
     assert "TOKEN=secret" not in repr(result)
+
+
+def test_protected_mutation_deny_has_no_workspace_side_effect(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    protected = workspace / ".git" / "config"
+    protected.parent.mkdir(parents=True)
+    protected.write_text("original", encoding="utf-8")
+    resolver = WorkspacePathResolver(workspace)
+    registry = ToolRegistry()
+    registry.register(EditFileTool(resolver))
+    call = ToolCall(
+        "edit-protected",
+        "edit_file",
+        {
+            "path": ".git/config",
+            "old_text": "original",
+            "new_text": "changed",
+            "expected_count": 1,
+        },
+    )
+    client = FakeModelClient(
+        [ModelResponse(None, (call,)), ModelResponse("Mutation denied.")]
+    )
+    runtime = AgentRuntime(
+        client,
+        ContextManager(),
+        registry,
+        TEST_LIMITS,
+        workspace_resolver=resolver,
+        policy_engine=PolicyEngine(),
+        user_interaction=FakeUserInteraction(),
+    )
+
+    run = runtime.run("Change Git internals")
+
+    assert run.state is RunState.COMPLETED
+    result = client.requests[1].messages[-1].results[0]  # type: ignore[union-attr]
+    assert result.outcome is ToolOutcome.POLICY_REJECTED
+    assert result.error is not None
+    assert result.error.code == "PROTECTED_PATH_MUTATION"
+    assert protected.read_text(encoding="utf-8") == "original"

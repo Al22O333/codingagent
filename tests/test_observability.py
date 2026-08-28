@@ -84,6 +84,28 @@ def test_observer_exception_is_isolated_from_runtime_semantics() -> None:
     assert run.final_response == "Finished."
 
 
+def test_known_runtime_secret_is_redacted_before_observer_callback() -> None:
+    events: list[RuntimeEvent] = []
+    secret = "runtime-provider-secret"
+    call = ToolCall("shell", "shell", {"command": f"echo {secret}"})
+    runtime = AgentRuntime(
+        FakeModelClient([ModelResponse(None, (call,)), ModelResponse("Done.")]),
+        ContextManager(),
+        ToolRegistry(),
+        LIMITS,
+        policy_engine=PolicyEngine(),
+        user_interaction=FakeUserInteraction(),
+        observer=events.append,
+        runtime_secret_values=(secret,),
+    )
+
+    runtime.run("Complete the task")
+
+    assert secret not in repr(events)
+    proposed = next(event for event in events if event.kind == "tool_proposed")
+    assert "<redacted>" in proposed.facts["action"]
+
+
 def test_observer_reports_policy_and_exact_permission_lifecycle(
     tmp_path: Path,
 ) -> None:
