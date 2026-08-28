@@ -34,7 +34,7 @@ class FakeModelExhaustedError(AssertionError):
     """Raised when a test asks for more responses than it configured."""
 
 
-FakeModelEvent: TypeAlias = ModelResponse | Exception
+FakeModelEvent: TypeAlias = ModelResponse | BaseException
 
 
 class FakeModelClient:
@@ -63,7 +63,7 @@ class FakeModelClient:
             )
 
         event = self._events.popleft()
-        if isinstance(event, Exception):
+        if isinstance(event, BaseException):
             raise event
         return event
 
