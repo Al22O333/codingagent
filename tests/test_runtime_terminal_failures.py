@@ -80,7 +80,7 @@ def test_local_tool_keyboard_interrupt_cancels_without_next_model_turn(
                 text=None,
                 tool_calls=(ToolCall("read", "read_file", {"path": "main.py"}),)
             ),
-            ModelResponse(text="must remain unused"),
+            ModelResponse(text="Recovered after cancellation."),
         ]
     )
     context = ContextManager()
@@ -120,7 +120,7 @@ def test_policy_exception_fails_without_escaping_or_next_model_turn(
                 text=None,
                 tool_calls=(ToolCall("read", "read_file", {"path": "main.py"}),)
             ),
-            ModelResponse(text="must remain unused"),
+            ModelResponse(text="Recovered after runtime failure."),
         ]
     )
     runtime = _runtime(
@@ -136,6 +136,13 @@ def test_policy_exception_fails_without_escaping_or_next_model_turn(
     assert run.termination_reason is TerminationReason.RUNTIME_FAILURE
     assert isinstance(run.last_error, RuntimeError)
     assert len(client.requests) == 1
+
+    second = runtime.run("Report recovery")
+
+    assert second.state is RunState.COMPLETED
+    assert second.final_response == "Recovered after runtime failure."
+    assert len(client.requests) == 2
+    assert runtime.session.runs == (run, second)
 
 
 def test_context_exception_fails_before_model_request(tmp_path: Path) -> None:
