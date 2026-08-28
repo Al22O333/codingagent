@@ -115,6 +115,30 @@ def test_composition_root_registers_complete_v1_toolset(tmp_path: Path) -> None:
     ]
 
 
+def test_composition_uses_openai_compatible_client_by_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[object] = []
+    fake = FakeModelClient([ModelResponse(text="Ready.")])
+
+    def build_default(config: object) -> FakeModelClient:
+        captured.append(config)
+        return fake
+
+    monkeypatch.setattr(cli, "OpenAICompatibleModelClient", build_default)
+
+    runtime = build_runtime(
+        _config(tmp_path),
+        user_interaction=FakeUserInteraction(),
+    )
+
+    assert runtime.run("Inspect").state is RunState.COMPLETED
+    assert len(captured) == 1
+    assert captured[0].model == "test-model"  # type: ignore[attr-defined]
+    assert captured[0].base_url == "https://provider.invalid/v1"  # type: ignore[attr-defined]
+
+
 def test_composed_runtime_executes_real_read_file_tool(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text("answer = 42\n", encoding="utf-8")
     call = ToolCall("read", "read_file", {"path": "main.py"})

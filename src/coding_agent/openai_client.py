@@ -41,8 +41,8 @@ from .protocol import (
 @dataclass(frozen=True, slots=True)
 class OpenAICompatibleConfig:
     model: str
+    base_url: str
     api_key: str = field(repr=False)
-    base_url: str | None = None
     timeout_seconds: float = 60.0
 
     def __post_init__(self) -> None:
@@ -50,8 +50,8 @@ class OpenAICompatibleConfig:
             raise ValueError("model must not be blank")
         if not self.api_key.strip():
             raise ValueError("api_key must not be blank")
-        if self.base_url is not None and not self.base_url.strip():
-            raise ValueError("base_url must not be blank when supplied")
+        if not self.base_url.strip():
+            raise ValueError("base_url must not be blank")
         if self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
 

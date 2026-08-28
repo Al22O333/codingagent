@@ -287,7 +287,11 @@ def test_truncated_provider_response_cannot_complete_runtime() -> None:
         ]
     )
     client = OpenAICompatibleModelClient(
-        OpenAICompatibleConfig(model="test-model", api_key="test-key"),
+        OpenAICompatibleConfig(
+            model="test-model",
+            base_url="https://provider.invalid/v1",
+            api_key="test-key",
+        ),
         sdk_client=sdk,
     )
     runtime = AgentRuntime(
@@ -310,16 +314,46 @@ def test_truncated_provider_response_cannot_complete_runtime() -> None:
 
 def test_config_rejects_missing_required_values() -> None:
     with pytest.raises(ValueError):
-        OpenAICompatibleConfig(model="", api_key="key")
+        OpenAICompatibleConfig(model="", base_url="https://provider.invalid/v1", api_key="key")
     with pytest.raises(ValueError):
-        OpenAICompatibleConfig(model="model", api_key="")
+        OpenAICompatibleConfig(model="model", base_url="https://provider.invalid/v1", api_key="")
+    with pytest.raises(ValueError):
+        OpenAICompatibleConfig(model="model", base_url="", api_key="key")
 
 
 def test_config_repr_does_not_expose_api_key() -> None:
     secret = "super-secret-test-key"
-    config = OpenAICompatibleConfig(model="test-model", api_key=secret)
+    config = OpenAICompatibleConfig(
+        model="test-model",
+        base_url="https://provider.invalid/v1",
+        api_key=secret,
+    )
 
     representation = repr(config)
 
     assert secret not in representation
     assert "test-model" in representation
+
+
+def test_default_sdk_client_uses_bounded_timeout_and_disables_sdk_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_openai(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr("coding_agent.openai_client.OpenAI", fake_openai)
+
+    OpenAICompatibleModelClient(
+        OpenAICompatibleConfig(
+            model="test-model",
+            base_url="https://provider.invalid/v1",
+            api_key="test-key",
+        )
+    )
+
+    assert captured["base_url"] == "https://provider.invalid/v1"
+    assert captured["timeout"] == 60.0
+    assert captured["max_retries"] == 0
