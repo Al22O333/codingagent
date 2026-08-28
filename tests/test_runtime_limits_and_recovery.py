@@ -69,13 +69,17 @@ def _registry(workspace: Path | None = None) -> ToolRegistry:
 def test_transport_retry_reuses_same_request_without_extra_model_turn() -> None:
     delays: list[float] = []
     client = FakeModelClient(
-        [TransientProviderError("temporary"), ModelResponse(text="Recovered.")]
+        [
+            TransientProviderError("temporary one"),
+            TransientProviderError("temporary two"),
+            ModelResponse(text="Recovered."),
+        ]
     )
     runtime = AgentRuntime(
         client,
         ContextManager(),
         _registry(),
-        _limits(transport_retries=1),
+        _limits(transport_retries=2),
         policy_engine=PolicyEngine(),
         user_interaction=FakeUserInteraction(),
         sleep_fn=delays.append,
@@ -85,9 +89,9 @@ def test_transport_retry_reuses_same_request_without_extra_model_turn() -> None:
 
     assert run.state is RunState.COMPLETED
     assert run.model_turns == 1
-    assert len(client.requests) == 2
-    assert client.requests[0] is client.requests[1]
-    assert delays == [0.25]
+    assert len(client.requests) == 3
+    assert len({id(request) for request in client.requests}) == 1
+    assert delays == [0.5, 1.0]
 
 
 def test_transport_retry_exhaustion_fails_without_model_turn() -> None:
@@ -112,7 +116,7 @@ def test_transport_retry_exhaustion_fails_without_model_turn() -> None:
     assert run.model_turns == 0
     assert len(client.requests) == 2
     assert client.requests[0] is client.requests[1]
-    assert delays == [0.25]
+    assert delays == [0.5]
 
 
 def test_fatal_provider_error_is_not_retried() -> None:
@@ -242,6 +246,7 @@ def test_protocol_error_limit_exhaustion_stops_without_next_turn() -> None:
         [
             ModelResponse(text=None),
             ModelResponse(text="   "),
+            ModelResponse(text=None),
             ModelResponse(text="must remain unused"),
         ]
     )
@@ -250,7 +255,7 @@ def test_protocol_error_limit_exhaustion_stops_without_next_turn() -> None:
         client,
         context,
         _registry(),
-        _limits(protocol_errors=2),
+        _limits(protocol_errors=3),
         policy_engine=PolicyEngine(),
         user_interaction=FakeUserInteraction(),
     )
@@ -259,10 +264,37 @@ def test_protocol_error_limit_exhaustion_stops_without_next_turn() -> None:
 
     assert run.state is RunState.FAILED
     assert run.termination_reason is TerminationReason.PROTOCOL_FAILURE
-    assert run.model_turns == 2
-    assert run.consecutive_protocol_errors == 2
-    assert len(client.requests) == 2
+    assert run.model_turns == 3
+    assert run.consecutive_protocol_errors == 3
+    assert len(client.requests) == 3
     assert context.build_messages() == ()
+
+
+def test_valid_tool_response_resets_consecutive_protocol_error_count() -> None:
+    valid_tool_call = ToolCall("unknown", "unknown_tool", {})
+    client = FakeModelClient(
+        [
+            ModelResponse(text=" "),
+            ModelResponse(text=None, tool_calls=(valid_tool_call,)),
+            ModelResponse(text=" "),
+            ModelResponse(text="Recovered."),
+        ]
+    )
+    runtime = AgentRuntime(
+        client,
+        ContextManager(),
+        _registry(),
+        _limits(protocol_errors=2),
+        policy_engine=PolicyEngine(),
+        user_interaction=FakeUserInteraction(),
+    )
+
+    run = runtime.run("Complete the task")
+
+    assert run.state is RunState.COMPLETED
+    assert run.model_turns == 4
+    assert run.consecutive_protocol_errors == 0
+    assert len(client.requests) == 4
 
 
 def test_model_turn_budget_stops_before_requesting_another_turn(

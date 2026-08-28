@@ -179,7 +179,7 @@ class AgentRuntime:
         user_interaction: UserInteraction,
         clock: Callable[[], float] = monotonic,
         sleep_fn: Callable[[float], None] = sleep,
-        transport_retry_base_delay_seconds: float = 0.25,
+        transport_retry_base_delay_seconds: float = 0.5,
         transport_retry_max_delay_seconds: float = 2.0,
         tool_activity: Callable[[ToolCall], None] | None = None,
     ) -> None:
