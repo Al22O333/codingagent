@@ -1,103 +1,68 @@
-# Coding Agent v1 Implementation Plan
+# Coding Agent v1 — 07–09 Conformance Implementation Plan
 
 ## Purpose and Authority
 
-本文是 Coding Agent v1 的开发执行路线和进度 canonical source，负责：
+本文是 Coding Agent v1 当前开发执行路线与进度的 canonical source，覆盖 07–09 freeze 后的 conformance work。
 
-- 记录 v1 的具体实现顺序；
-- 让开发过程按小步 vertical slice 推进；
-- 防止一次生成大量代码或越过当前阶段实现后续能力；
-- 为 Git commit history 提供自然、可解释的演进路径；
-- 记录每一步的 Goal、Scope、Out of Scope、Acceptance 和 Suggested Commit；
-- 明确当前应该实现哪一步。
+本计划不拥有架构决策。01–09 的 canonical owner 文档优先于本计划；本轮 normative targets 以以下内容为核心：
 
-本文不拥有架构决策。架构决策仍以 01–06 的 canonical owner 文档为准。若本文与 01–06 冲突：
+- `07-context-and-prompt-policy.md` §57 Implementation Obligations；
+- `08-verification-testing-and-demo.md` 的 requirement/evidence traceability 与 §52 07-Conformance Verification；
+- `09-cli-observability-and-configuration.md` §58 09-Conformance Work and Evidence。
 
-> 01–06 优先，implementation plan 必须修改以符合 architecture。
-
-本文不得重新定义 safety、Runtime、protocol 或 Tool contract。
+若本计划与 owner document 冲突，必须停止当前 Step、记录具体 contradiction，并先修正 owner 或本计划；不得静默绕过 contract。
 
 ## Progress Summary
 
-~~~text
+```text
+Current Phase: M2 — 07/08/09 Conformance
 Current Step: Step 0
-Completed: 0 / 24
+Completed: 0 / 19
 In Progress: None
-Next: Step 0 — Repository / Python Skeleton
-~~~
+Next: Step 0 — Baseline and Conformance Snapshot
+```
 
-更新任一 Step 状态时，必须同步更新本节。Step 0 至 Step 23 共 24 Steps。
+Step 0 到 Step 18 共 19 Steps。进度状态只有 `TODO`、`IN PROGRESS`、`DONE`。实现 Agent 不得自动把 Step 标记为 `DONE`；状态由开发者 review 后单独更新。
 
-## Development Principles
+## Execution Rules
 
 1. 一次只实现一个 Step。
-2. 当前 Step 的测试与实现一起完成。
-3. 当前 Step 验收通过后再进入下一 Step。
-4. 不提前实现后续 `TODO` Step。
-5. 不为未来需求提前增加 abstraction。
-6. 优先 vertical slice，而不是先建立大量空框架。
-7. 每个 Step 应尽量形成独立、可解释的 Git commit。
-8. 如果实现过程中发现 architecture contract 无法实现，应先记录具体 contradiction，再修改 canonical owner 文档；不能静默绕过。
-9. `TODO`、`IN PROGRESS`、`DONE` 是唯一进度状态。
-10. Step 顺序可以因为真实 implementation blocker 做小范围调整，但必须记录原因；不能因为“顺手”大规模并行实现。
+2. 当前 Step 的实现与测试一起完成，验收通过后才进入下一 Step。
+3. 不提前实现后续 TODO Step，不为未来需求增加 abstraction。
+4. 优先小步 vertical slice，不建立空 framework。
+5. 每个 Step 尽量形成独立、可测试、可解释的 commit。
+6. 已经由此前 hardening 实现的行为，在对应 Step 先验证；若 contract 与 evidence 均已闭合，不重复改写生产代码。
+7. 只修复当前 Step 暴露的真实 contract gap，不顺手扩大范围。
+8. 发现 concrete implementation contradiction、impossible contract、owner conflict 或无法实现的 safety invariant 时，停止并按 Architecture Reopen Rule 处理。
+9. 不因“更优雅”“以后可能有用”或“方便扩展”而 reopen architecture。
+10. 未经开发者明确要求，不自动 commit、push 或更新 Step 状态。
 
 ## Commit Discipline
 
-- 默认一个 Step 对应一个主要 commit。
-- 如果 Step 自然需要两个独立 commit，可以拆分。
-- 不人为 squash 成一个大 commit。
-- 不为了“commit 多”机械拆成一行一个 commit。
-- commit 应代表可解释、可测试的增量。
-- 每次 commit 前运行当前相关 tests。
-- 不修改 Git 历史。
-- 不提前 commit 未完成的大量后续代码。
-- docs-only implementation plan 可以单独 commit。
-
-当前文档建议 commit：
-
-`docs: add incremental implementation plan`
+- 默认一个 Step 对应一个主要 commit；自然独立的变更可以拆分。
+- commit 必须代表可解释、可测试的增量。
+- commit 前运行当前相关 tests；合理时运行完整 regression suite。
+- 不修改 Git 历史，不提交后续 Step 的未完成代码。
+- 不为了增加 commit 数量机械拆分变更。
 
 ## How to Execute a Step
 
-以后给 Coding Agent / Codex 的实现指令遵循：
-
-1. Read the current Step from `document/implementation-plan.md`.
-2. Read only the architecture owner documents relevant to that Step.
-3. Implement only the current Step.
-4. Do not implement later `TODO` Steps.
-5. Add or update tests for the current Step.
-6. Run relevant tests.
-7. Report:
-   - changed files；
-   - tests；
-   - unresolved blockers。
-8. Do not mark a Step `DONE` automatically unless explicitly instructed.
-9. After human review and commit, update plan status separately.
-
-实现代码的 Agent 不得擅自执行：
-
-~~~text
-TODO → DONE
-~~~
-
-进度状态由开发者确认后更新。
+1. 从本文读取 Current Step。
+2. 只读取与该 Step 有关的 architecture owner documents。
+3. 只实现当前 Step 的 Goal 和 Scope。
+4. 添加或更新当前 Step 所需 tests。
+5. 运行相关 tests，合理时运行完整 `pytest`。
+6. 报告 changed files、tests、verification 与 blockers。
+7. 不自动开始下一 Step，不自动将当前 Step 改为 `DONE`。
 
 ## Architecture Reopen Rule
 
-01–06 当前视为已批准 architecture。实现过程中只有出现以下情况，才允许 reopen canonical owner 文档：
+只有以下情况允许 reopen owner document：
 
 - concrete implementation contradiction；
 - impossible contract；
-- two owner documents truly conflict；
+- two canonical owner documents truly conflict；
 - safety invariant cannot be implemented as written。
-
-以下理由不足以 reopen：
-
-- “另一种设计更优雅”；
-- “未来扩展更方便”；
-- “可以顺便支持更多 provider”；
-- “可以抽象成 framework”；
-- “可能以后有用”。
 
 发现真实 contradiction 时：
 
@@ -108,1243 +73,773 @@ TODO → DONE
 5. update owner document；
 6. resume Step。
 
+以下理由不足以 reopen：
+
+- 另一种设计更优雅；
+- 未来扩展更方便；
+- 可以顺便支持更多 provider；
+- 可以抽象成 framework；
+- 可能以后有用。
+
 ---
 
-## Step 0 — Repository / Python Skeleton
+## M2-A — Configuration and Resource Foundation
+
+## Step 0 — Baseline and Conformance Snapshot
 
 **Status:** TODO
 
 ### Goal
 
-建立最小可运行、可测试的 Python 3.11+ 项目骨架。
+确定当前代码与测试基线，不改变产品行为。
 
 ### Scope
 
-- Python 3.11+；
-- `src/` package structure；
-- `tests/`；
-- CLI entry point；
-- `pyproject.toml`；
-- `.gitignore`；
-- minimal smoke test；
-- CLI 暂时只需能启动并输出简单信息。
+- 运行完整 deterministic test suite；
+- 记录 baseline test 数量与任何失败原因；
+- 核对 07 §57、08 traceability/§52、09 §58 的 implementation obligations；
+- 记录当前工作树状态，并区分既有用户文件与本轮产生的变更；
+- 验证此前 hardening 已覆盖的 contract，不重复实现。
 
 ### Out of Scope
 
-- ModelClient；
-- AgentRuntime；
-- Tool；
-- Policy；
-- Context；
-- real LLM。
+- 功能修复；
+- 生产代码重构；
+- 新 abstraction；
+- 修改 architecture documents。
 
 ### Acceptance
 
-- package 可以正常 import；
-- CLI 可以启动；
-- `pytest` 可以运行并通过至少一个 smoke test；
-- 没有 Agent 业务逻辑。
+- `pytest -q` 结果与测试数量已记录；
+- 所有 baseline failure 都有明确归因；
+- 既有非本轮文件未被修改或纳入提交；
+- 后续 Step 的真实 gap 已可从 owner contract 与 evidence 判断。
 
 ### Suggested Commit
 
-`chore: initialize Python project skeleton`
+无需 commit；若只更新本文，可使用 `docs: start 07-09 conformance track`。
 
 ---
 
-## Step 1 — Core Protocol Value Objects
+## Step 1 — Centralize v1 AgentConfig
 
 **Status:** TODO
 
 ### Goal
 
-实现 05 定义的 provider-neutral core protocol/value objects，不实现 orchestration。
+把 09 的 operational defaults、required values、precedence 与 validated ranges 收敛为单一 Lean configuration source。
 
 ### Scope
 
-- `ToolCall`；
-- `ToolResult`；
-- `ToolError`；
-- `ToolOutcome`；
-- `ToolKind`；
-- `ToolCapability`；
-- `ToolSpec`；
-- `ModelRequest`；
-- `ModelResponse`；
-- `ModelUsage`；
-- InternalMessage types：
-  - `SystemMessage`；
-  - `UserMessage`；
-  - `AssistantMessage`；
-  - `ToolResultMessage`；
-- 根据 05 当前正式定义实现，不使用旧 draft；
-- 优先使用 enum、dataclass / frozen dataclass 和 small immutable value objects。
+- 新增或收敛一个 `AgentConfig`；
+- required：`model`、`base_url`、explicit workspace、environment-only API key；
+- defaults：model turns 24、tool attempts 64、active duration 900 seconds、context chars 80,000、debug false；
+- public ranges：turns 1..64、attempts 1..256、duration 1..3600、context 8,000..256,000；
+- precedence：CLI > environment > built-in default；
+- `model`、`base_url`、workspace、API key 无 built-in default；
+- secret-bearing field 不进入 `repr`。
 
 ### Out of Scope
 
-- Tool execution；
-- Model SDK；
-- Runtime loop；
-- Context trimming；
-- permission。
+- ConfigManager / ConfigService；
+- provider profiles；
+- configuration file system；
+- budget hierarchy。
 
 ### Acceptance
 
-- core objects 可构造；
-- immutable contract 按 05 落实；
-- enum 和 basic invariants 有 unit test。
+- precedence tests；
+- missing model/base URL/API key/workspace 在 startup/config boundary 失败；
+- 所有 public range 上下界与越界 tests；
+- API key 不出现在 config representation；
+- Runtime、Context 与 CLI 不再各自维护冲突的 public defaults。
 
 ### Suggested Commit
 
-`feat: define core model and tool protocols`
+`feat: centralize validated agent configuration`
 
 ---
 
-## Step 2 — Tool Abstraction and Registry
+## Step 2 — Provider Startup Defaults
 
 **Status:** TODO
 
 ### Goal
 
-实现 05 的 Tool abstraction 和最小 ToolRegistry。
+落实 09 的 provider startup contract，并在 Session 创建前验证完整配置。
 
 ### Scope
 
-- Tool argument typed validation；
-- Pydantic v2 schema generation；
-- ToolSpec exposure；
-- `ToolRegistry.register`；
-- `ToolRegistry.get`；
-- `ToolRegistry.specs`；
-- unique name startup invariant；
-- invalid ToolSpec / duplicate registration fail fast；
-- test-only DummyTool。
+- default client 为 `OpenAICompatibleModelClient`；
+- required model、base URL 与 environment API key；
+- per-attempt provider request timeout 60 seconds；
+- SDK automatic retry disabled/zero where practical；
+- Runtime 继续 owning retry semantics。
 
 ### Out of Scope
 
-- real File Tool；
-- Shell；
-- PolicyEngine；
-- Runtime dispatch；
-- plugin framework。
+- Runtime retry backoff；
+- multi-provider hierarchy；
+- provider profile registry；
+- streaming。
 
 ### Acceptance
 
-- valid dummy Tool 可以注册和 lookup；
-- model-visible JSON Schema 可由 typed model 生成；
-- duplicate name 产生 startup failure；
-- unknown Tool 可被 registry 层识别。
+- valid config 可构造 concrete client；
+- missing model/base URL/key 在 Session 前失败；
+- request timeout 为 60 seconds；
+- SDK 不与 Runtime 重复 retry。
 
 ### Suggested Commit
 
-`feat: add tool abstraction and registry`
+`feat: enforce provider startup configuration`
 
 ---
 
-## Step 3 — ModelClient Protocol and FakeModelClient
+## Step 3 — Shell Timeout and Platform Backend
 
 **Status:** TODO
 
 ### Goal
 
-实现 Runtime-facing ModelClient seam，但暂时不接真实 LLM。
+落实 09 的 bounded Shell timeout 与 platform backend contract。
 
 ### Scope
 
-- ModelClient Protocol / interface；
-- `complete(ModelRequest) -> ModelResponse`；
-- FakeModelClient；
-- FakeModelClient 可以按预设 response sequence 返回结果；
-- provider error test doubles as needed；
-- 保持正确结构：
-
-~~~text
-AgentRuntime
-→ ModelClient Protocol
-→ concrete ModelClient
-~~~
-
-当前架构已经取消独立 ProviderAdapter。
+- default timeout 120 seconds；
+- absolute maximum 300 seconds；
+- argument/schema validation enforce `1 <= timeout_seconds <= 300`；
+- 越界在 execution 前产生 validation failure，不 clamp；
+- Windows 使用 `COMSPEC`，POSIX 使用 `/bin/sh`；
+- 移除 public `CODING_AGENT_SHELL` override；
+- 保留 test-only injection seam。
 
 ### Out of Scope
 
-- OpenAI-compatible SDK；
-- network request；
-- real provider config；
-- retry orchestration。
+- Shell execution semantic redesign；
+- shell profile/config system；
+- new sandbox；
+- background execution。
 
 ### Acceptance
 
-- FakeModelClient 可以 deterministic 返回 Final response；
-- FakeModelClient 可以 deterministic 返回 ToolCall response；
-- Runtime tests 后续无需真实网络。
+- default 120；1 与 300 valid；0 与 301 invalid；
+- Windows/POSIX backend selection tests；
+- public environment 不能切换 Shell backend。
 
 ### Suggested Commit
 
-`feat: add model client interface and fake client`
+`fix: enforce bounded shell timeout and backend`
 
 ---
 
-## Step 4 — Minimal ContextManager
+## Step 4 — Align File and Discovery Resource Limits
 
 **Status:** TODO
 
 ### Goal
 
-实现最小 provider-neutral conversation context storage/building。
+落实 09 concrete resource defaults，并使内部工作本身有界。
 
 ### Scope
 
-- record UserMessage；
-- record AssistantMessage；
-- record ToolResultMessage；
-- build current InternalMessage sequence；
-- 保证 Assistant ToolCall message 位于对应 ToolResult 前；
-- 保持实现极小。
+- `read_file` default 200 lines、absolute max 400 lines、returned content max 20,000 bytes；
+- `list_directory` max 200 direct entries；
+- `search_files` max 200 paths；
+- `search_text` max 100 matches；
+- `search_text` model projection max 16,000 chars；
+- 使用 bounded/streamed reading、bounded discovery 与 early stop；
+- 保持 continuation/truncated semantics。
+
+### Out of Scope
+
+- 通用 streaming framework；
+- symbol index；
+- ranking；
+- 新的 search backend abstraction。
+
+### Acceptance
+
+- large-file、large-directory、large-match tests 证明内部与返回结果有界；
+- `truncated` 与 continuation 正确；
+- line/byte absolute limits 正确；
+- 已符合 contract 的实现只补 evidence，不重复重写。
+
+### Suggested Commit
+
+`fix: align bounded file and discovery limits`
+
+---
+
+## Step 5 — Preserve Shell Head and Tail at Capture Boundary
+
+**Status:** TODO
+
+### Goal
+
+让 06 resource capture 保留足够的 bounded head/tail 信息，供 07 model projection 使用。
+
+### Scope
+
+- stdout 与 stderr 各自 capture 不超过 64 KiB；
+- truncated stream 同时保留 head、tail 与 truncation fact；
+- capture 与最终 model-visible 8,000-char projection 保持分层；
+- 使用小型 bounded collector 或等价局部实现。
+
+### Out of Scope
+
+- 通用 stream subsystem；
+- model projection；
+- async/background process framework。
+
+### Acceptance
+
+- 大输出中的 `HEAD_MARKER` 与 `TAIL_MARKER` 均被 capture；
+- 每个 stream capture 独立且不超过 resource cap；
+- short output 保持 faithful。
+
+### Suggested Commit
+
+`fix: preserve bounded shell head and tail`
+
+---
+
+## M2-B — Context and Prompt Conformance
+
+## Step 6 — Context Run Lifecycle and Session Continuity
+
+**Status:** TODO
+
+### Goal
+
+建立正确的 current-Run、completed-run continuity 与 pending correspondence 生命周期；本 Step 不实现 context budget。
+
+### Scope
+
+- 明确区分 completed-run continuity、current-run history、pending ToolCall correspondence；
+- 新 Run 重置 current-run transient state 与 `history_incomplete = false`；
+- COMPLETED 只保留 initial user task + final assistant response，最多 1 个 completed Run；
+- FAILED/CANCELLED 不进入 continuity；
+- 集中式 `end_run` 或等价 cleanup boundary；
+- terminal path 清理 pending ToolCall、ask_user transient state 与 incomplete unit。
+
+### Out of Scope
+
+- context budget/eviction；
+- Base Prompt；
+- ToolResult projection；
+- persistent Session。
+
+### Acceptance
+
+- COMPLETED Run1 → Run2 只看到 task + final continuity；
+- FAILED/CANCELLED Run 不进入 continuity；
+- pending tool 时 interruption 后 Run2 可正常开始；
+- terminal cleanup 不留下 orphan correspondence。
+
+### Suggested Commit
+
+`fix: make context run lifecycle recoverable`
+
+---
+
+## Step 7 — Atomic Tool Units and Bounded Context Eviction
+
+**Status:** TODO
+
+### Goal
+
+实现 07 的 provider-neutral bounded working context 与 atomic eviction。
+
+### Scope
+
+- Assistant ToolCall message 与 grouped ToolResult message 作为 atomic Tool Unit；
+- eviction order：oldest completed continuity，再 oldest removable current-run unit；
+- 保护 Base Prompt、current initial task、current ask_user unit、latest completed Tool Unit 与 required transient instructions；
+- default budget 80,000 chars，从 AgentConfig 注入；
+- destructive eviction 后 `history_incomplete = true`，sticky until Run end；
+- mandatory content 无法 fit 时抛出 internal `ContextLimitError` 或等价错误。
 
 ### Out of Scope
 
 - summarization；
-- token counting policy；
-- trimming；
-- stale-context strategy；
-- retained session summary；
-- 07 的完整 Context policy。
+- provider tokenizer；
+- semantic memory；
+- 新 public error taxonomy。
 
 ### Acceptance
 
-- message order deterministic；
-- AssistantMessage → ToolResultMessage correspondence 顺序正确；
-- basic unit tests 通过。
+- atomic eviction 无 orphan ToolCall/ToolResult；
+- completed continuity 先淘汰；
+- latest required unit 受保护；
+- `history_incomplete` false→true、sticky、next Run reset；
+- mandatory overflow 产生 internal failure。
 
 ### Suggested Commit
 
-`feat: add minimal conversation context manager`
+`feat: add bounded atomic context eviction`
 
 ---
 
-## Step 5 — Minimal AgentRuntime: Model to Final
+## Step 8 — Stable Base Prompt and Effective System Prefix
 
 **Status:** TODO
 
 ### Goal
 
-第一次实现最小 AgentRuntime loop，但只支持：
-
-~~~text
-User
-→ Model
-→ Final
-~~~
+实现每次 request 重建的 Stable Base Prompt 与 deterministic Effective System Prefix。
 
 ### Scope
 
-- Session / AgentRun 最小 Runtime State；
-- `RUNNING`；
-- `COMPLETED`；
-- `FAILED`；
-- `CANCELLED`；
-- model turn counter；
-- Runtime 调用 ContextManager；
-- Runtime 调用 ModelClient；
-- no-tool + non-empty text → `COMPLETED`；
-- empty / whitespace no-tool response → `ModelProtocolError` path 的基础处理。
+- `BASE_SYSTEM_PROMPT` 不作为 history message；
+- prefix order：Base Prompt → truncation notice → optional repeated-action warning → optional protocol corrective instruction；
+- corrective instruction 始终是 Effective System Prefix 的最后一项；
+- retained continuity 与 current-run history 位于 prefix 之后；
+- `ModelRequest.tools` 保持独立字段；
+- 使用小型 pure helper，不建立 PromptManager。
 
 ### Out of Scope
 
-- Tool execution；
-- Tool batch；
-- Policy；
-- Shell；
-- real provider；
-- complete retry framework。
+- Prompt framework/pipeline；
+- prompt templating system；
+- ToolResult projection；
+- Runtime retry integration。
 
 ### Acceptance
 
-- FakeModelClient 返回合法 Final → `COMPLETED`；
-- empty Final 不会 `COMPLETED`；
-- Runtime 是 sole orchestrator。
+- Base 永远第一；
+- conditional notice/warning 顺序正确；
+- corrective 始终最后；
+- transient instructions 不进入 history 或 continuity。
 
 ### Suggested Commit
 
-`feat: implement minimal agent runtime loop`
+`feat: assemble stable system prefix`
 
 ---
 
-## Step 6 — Shared Workspace Resolver
+## Step 9 — ToolResult Model Projection
 
 **Status:** TODO
 
 ### Goal
 
-实现 03 / 06 定义的 shared workspace path-resolution primitive。
+实现 bounded、faithful、secret-safe 的 model-visible ToolResult projection。
 
 ### Scope
 
-- workspace root binding；
-- canonical workspace root；
-- `EXISTING` path resolution；
-- `NEW` path resolution；
-- canonical / semantic containment facts；
-- `ResolvedPath`；
-- `is_within_workspace`；
-- `workspace_relative_path: str | None`；
-- sensitive / protected classification 基础；
-- inside / outside policy fact distinction。
+- pure `project_tool_result` helper 或等价局部模块；
+- discovery/search 输出相对路径、必要行号/文本与 truncation；
+- `read_file` faithful bounded content；
+- `edit_file` 只投影 path + replacement count；
+- `create_file` concise result；
+- `ask_user` faithful answer；
+- error 投影 outcome + formal code + safe concise details，无 traceback；
+- preserve `call_id` 与 `ToolResult.outcome`。
 
 ### Out of Scope
 
-- `read_file`；
-- PolicyEngine decision；
-- Shell；
-- File mutation。
+- ToolResultProjector subsystem；
+- human CLI rendering；
+- provider-specific formatting；
+- Shell head/tail projection。
 
 ### Acceptance
 
-至少测试：
-
-- relative inside path；
-- absolute inside path；
-- `..`；
-- absolute outside；
-- symlink / equivalent supported platform case；
-- new target under existing parent；
-- outside workspace 可成功形成 policy fact，而不是误报 `OPERATION_FAILURE`。
+- 每个 v1 Tool 至少一个 projection test；
+- mutation input/content 不被完整回显；
+- errors 不暴露 traceback 或 secrets；
+- projection 不改变 call correspondence/outcome。
 
 ### Suggested Commit
 
-`feat: add workspace path resolution`
+`feat: add bounded model tool-result projection`
 
 ---
 
-## Step 7 — First Real Tool: read_file
+## Step 10 — Shell Model Projection
 
 **Status:** TODO
 
 ### Goal
 
-实现第一个真实 LOCAL Tool。
+在 bounded capture 基础上实现 07/09 的 Shell model-visible projection。
 
 ### Scope
 
-- `read_file`；
-- UTF-8 text model；
-- binary heuristic；
-- existing path resolution；
-- bounded line-range paging；
-- `start_line` / `end_line`；
-- `total_lines`；
-- `truncated`；
-- `next_start_line`；
-- model-facing line number representation；
-- structured Tool operation errors。
+- stdout/stderr 各自最多 8,000 chars；
+- 长 stream 使用 bounded head + explicit omission marker + bounded tail；
+- streams 独立投影；
+- preserve exit code、truncated state 与 Tool outcome；
+- short output faithful。
 
 ### Out of Scope
 
-- search；
-- edit；
-- shell；
-- full Risk Permission system。
+- Shell capture/process changes；
+- CLI renderer；
+- streaming UI。
 
 ### Acceptance
 
-- normal text read；
-- bounded large-file read；
-- continuation；
-- missing file；
-- binary file；
-- UTF-8 decode failure；
-- outside-workspace 不被当作 `OPERATION_FAILURE`。
+- short stdout/stderr unchanged；
+- long stdout/stderr 各自保留 HEAD + TAIL + omission marker；
+- streams 不混合；
+- SUCCESS / UNSUCCESSFUL_COMMAND / OPERATION_FAILURE 不变。
 
 ### Suggested Commit
 
-`feat: add bounded read_file tool`
+`feat: project shell output with head and tail`
 
 ---
 
-## Step 8 — Runtime Tool Dispatch Vertical Slice
+## M2-C — Runtime Integration
+
+## Step 11 — Make Runtime Use the New Context Contract
 
 **Status:** TODO
 
 ### Goal
 
-第一次跑通完整 Tool Loop：
-
-~~~text
-Fake Model
-→ read_file ToolCall
-→ Runtime
-→ ToolResult
-→ Fake Model
-→ Final
-~~~
+让 Runtime 每个 semantic Model Turn 通过 ContextManager 构造最终 immutable `ModelRequest` snapshot。
 
 ### Scope
 
-- ToolRegistry lookup；
-- argument validation；
-- ToolCall attempt accounting；
-- LOCAL Tool dispatch basic path；
-- Tool execution；
-- Runtime creates ToolResult；
-- `call_id` correspondence；
-- AssistantMessage before ToolResultMessage；
-- next Model Turn；
-- 暂时只有 `read_file` 也可以。
+- Runtime 不自行拼接 history；
+- ContextManager build final request snapshot；
+- `ContextLimitError` 映射到现有 fatal Runtime failure/FAILED，且不发送下一 Model Turn；
+- transport retry 重用同一个 immutable logical request snapshot；
+- protocol corrective 是新 Model Turn，重新 build request 并加入 corrective prefix。
 
 ### Out of Scope
 
-- complex Policy；
-- multi-tool fail-stop；
-- shell；
-- edit；
-- confirmation。
+- transport backoff values；
+- terminal cleanup redesign；
+- observer events；
+- CLI changes。
 
 ### Acceptance
 
-至少一个 integration test 完整证明：
-
-~~~text
-User
-→ FakeModel
-→ read_file
-→ ToolResult
-→ FakeModel
-→ Final
-→ COMPLETED
-~~~
+- normal request assembly；
+- mandatory overflow → FAILED 且无 next turn；
+- transport retry request snapshot 相同；
+- corrective 产生新 request/turn，prefix ordering 正确。
 
 ### Suggested Commit
 
-`feat: execute tool calls through runtime loop`
+`feat: integrate bounded context into runtime`
 
 ---
 
-## Step 9 — Sequential Batch Semantics
+## Step 12 — Terminal Failure Boundary and Session Recovery
 
 **Status:** TODO
 
 ### Goal
 
-实现 04 的 multi-tool sequential batch + fail-stop semantics。
+集中收口 Runtime terminal paths，确保 interrupted/failed Run 不毒化 Session。
 
 ### Scope
 
-- multiple ToolCalls in one ModelResponse；
-- sequential execution；
-- fail-stop；
-- `NOT_EXECUTED`；
-- remaining calls correspondence；
-- untouched calls do not consume Tool Call Attempt；
-- recoverable result returns to next Model Turn。
+- normal terminal、KeyboardInterrupt、unexpected runtime/context/policy error 的统一 boundary；
+- KeyboardInterrupt → CANCELLED；
+- unexpected fatal Runtime failure → FAILED；
+- centralized terminal path 清理 AgentRun pending state 与 ContextManager run state；
+- no pending ToolCall/ask_user correspondence after terminal；
+- same Session 可启动下一 Run。
 
 ### Out of Scope
 
-- dependency analysis；
-- parallel Tool execution；
-- continue-after-failure heuristic；
-- later Policy and confirmation behavior beyond the existing batch contract。
+- persistent Session；
+- new terminal state taxonomy；
+- retry backoff；
+- CLI presentation polish。
 
 ### Acceptance
 
-必须包含：
-
-~~~text
-Call 1:
-read existing file
-→ SUCCESS
-
-Call 2:
-read missing file
-→ OPERATION_FAILURE
-
-Call 3:
-valid read
-→ NOT_EXECUTED
-~~~
-
-并验证：
-
-- Call 3 未进入 validation / execution；
-- Call 3 不增加 attempt；
-- ToolResult correspondence 完整。
+- Run1 在 pending Tool execution 时 KeyboardInterrupt → CANCELLED；
+- 同一 Session 的 Run2 正常发送 request 并可 COMPLETED；
+- unexpected exception → FAILED 后 Run2 仍可用；
+- Runtime/Context cleanup 不各留一半状态。
 
 ### Suggested Commit
 
-`feat: implement sequential tool batch semantics`
+`fix: recover session after terminal run interruption`
 
 ---
 
-## Step 10 — Runtime Budgets and Model Error Recovery
+## Step 13 — Transport Retry and Protocol Limits
 
 **Status:** TODO
 
 ### Goal
 
-闭合 04 / 05 的 deterministic Runtime budgets 与 model error semantics。
+落实 deterministic transport retry 与 consecutive protocol-error limits。
 
 ### Scope
 
-- `max_model_turns`；
-- `max_tool_call_attempts`；
-- active-duration tracking 基础；
-- `ModelProtocolError`；
-- bounded corrective re-prompt；
-- `TransientProviderError`；
-- `FatalProviderError`；
-- Transport Retry semantics；
-- retry same logical `ModelRequest`；
-- provider retry exhausted → `FAILED`；
-- protocol retry exhausted → `FAILED`。
-
-必须保持：
-
-~~~text
-assistant response obtained
-→ consumes Model Turn
-
-invalid assistant response
-→ already consumed Model Turn
-
-corrective response
-→ another Model Turn
-
-transport failure before assistant response
-→ no semantic Model Turn
-~~~
+- max transport retries 2；
+- delays 0.5s、1.0s，cap 2s，无 jitter；
+- 用 Lean `sleep_fn`/clock seam 测试，不建 time framework；
+- retry 重用相同 logical request，且不增加 semantic Model Turn；
+- max consecutive protocol errors 3；
+- invalid #1/#2 corrective，invalid #3 terminal，无第 4 个 corrective request；
+- valid response 重置 protocol-error counter。
 
 ### Out of Scope
 
-- real provider SDK；
-- complex backoff config；
-- 09 default values。
+- configurable backoff framework；
+- jitter；
+- provider SDK retry；
+- new protocol taxonomy。
 
 ### Acceptance
 
-- unit / integration tests 覆盖上述计数语义；
-- exhausted provider retry 和 corrective limit 均不会产生下一 Model Turn。
+- recorded sleeps 为 `[0.5, 1.0]`；
+- transport retry snapshot unchanged/no turn increment；
+- corrective increments turn；
+- third consecutive protocol failure terminal；
+- valid response resets counter。
 
 ### Suggested Commit
 
-`feat: add runtime budgets and model error recovery`
+`fix: bound provider retry and protocol recovery`
 
 ---
 
-## Step 11 — Shell Tool
+## M2-D — Observability and CLI
+
+## Step 14 — Generalize Existing Tool Activity into Lean Observer Seam
 
 **Status:** TODO
 
 ### Goal
 
-实现 06 的 bounded local Shell execution mechanism。
+把现有 narrow callback 收敛为 09 要求的 optional synchronous read-only observer seam，不引入 EventBus。
 
 ### Scope
 
-- `shell(command, cwd, timeout_seconds)`；
-- full command string；
-- resolved workspace cwd；
-- noninteractive stdin；
-- filtered environment 基础；
-- stdout；
-- stderr；
-- exit code；
-- timeout；
-- bounded output；
-- process launch error；
-- best-effort cleanup。
-
-Outcome：
-
-~~~text
-exit 0
-→ SUCCESS
-
-exit nonzero
-→ UNSUCCESSFUL_COMMAND
-
-timeout / launch / I/O failure
-→ OPERATION_FAILURE
-~~~
+- optional `observer/on_event` callback；
+- events 至少覆盖 run start/terminal、tool proposal/result、policy outcome、permission request/result、provider retry、protocol corrective、context eviction/history transition、budget exhaustion；
+- payload small、bounded、normalized、secret-safe；
+- callback return value ignored；
+- callback exception isolated，不影响 Runtime semantic behavior。
 
 ### Out of Scope
 
-- complete Risk Permission engine；
-- complex Shell classifier integration；
-- background execution framework；
-- async。
+- EventBus；
+- persistent logging；
+- telemetry backend；
+- observer-controlled Runtime decisions。
 
 ### Acceptance
 
-- exit 0；
-- exit nonzero；
-- timeout；
-- stderr；
-- output bound；
-- invalid cwd；
-- launch failure。
+- observer receives representative events；
+- observer raises exception 时 Agent 仍按原语义完成；
+- payload 不含 secrets 或 unbounded raw data；
+- absent observer 无行为差异。
 
 ### Suggested Commit
 
-`feat: add bounded shell execution tool`
+`feat: add isolated runtime observability hook`
 
 ---
 
-## Step 12 — Workspace Discovery Tools
+## Step 15 — Normal and Debug CLI Rendering
 
 **Status:** TODO
 
 ### Goal
 
-实现轻量 workspace navigation。
+实现 09 的 bounded、secret-safe Normal/Debug terminal rendering。
 
 ### Scope
 
-- `list_directory`；
-- `search_files`；
-- one-level directory listing；
-- glob path search；
-- deterministic ordering；
-- `.gitignore`；
-- default noise ignores；
-- sensitive discovery exclusion；
-- bounded results。
+- Normal 显示 workspace/model、concise Tool activity/result、Final；
+- 默认不打印 read/search full content、old/new text、create content、raw ToolResult/provider response/full config；
+- Shell command rendering bounded + redacted；
+- Debug 增加 turn/tool counts、call_id、outcome/code、policy facts、context state、eviction、history flag、retry/corrective 与 normalized usage；
+- raw provider metadata/HTTP payload、environment 与 secret 仍隐藏；
+- no persistent log。
 
 ### Out of Scope
 
-- `search_text`；
-- symbol index；
-- recursive directory tree Tool；
-- rg backend optimization。
+- rich TUI；
+- streaming display；
+- persistent trace database；
+- renderer changing Runtime behavior。
 
 ### Acceptance
 
-- `list_directory` 只列一层；
-- `search_files` glob 工作；
-- ignored / noise paths 被排除；
-- sensitive paths 默认不返回；
-- result bounded。
+- Normal/Debug capture tests；
+- secret、old/new text、raw provider payload 不出现在输出；
+- Normal hides usage，Debug only shows normalized usage；
+- renderer output bounded。
 
 ### Suggested Commit
 
-`feat: add workspace discovery tools`
+`feat: add bounded normal and debug cli rendering`
 
 ---
 
-## Step 13 — Text Search Tool
+## Step 16 — Interactive Session Semantics
 
 **Status:** TODO
 
 ### Goal
 
-实现 `search_text`。
+把 CLI 收敛为 09 定义的 same-process persistent interactive Session。
 
 ### Scope
 
-- literal search default；
-- optional regex；
-- `case_sensitive`；
-- optional `file_glob`；
-- path subtree；
-- line number；
-- line text；
-- binary / undecodable skip；
-- ignore rules；
-- sensitive exclusion；
-- bounded matches；
-- Python baseline implementation。
+- empty input → reprompt/no Run；
+- `/exit`、`/quit` 与 top-level EOF → exit 0；
+- top-level Ctrl+C → exit Session；
+- active-Run Ctrl+C → CANCELLED、display、reprompt；
+- FAILED/COMPLETED Run 后 reprompt；
+- `COMPLETED` 不自动呈现为 task success；
+- ask_user 与 exact-action permission 使用不同提示；
+- permission default No；
+- user wait timeout = None。
 
 ### Out of Scope
 
-- ripgrep dual backend；
-- ranking；
-- symbol analysis；
-- search cursor。
+- persistent Session resume；
+- GUI/TUI；
+- user-wait timer；
+- reusable permission grants。
 
 ### Acceptance
 
-- literal；
-- regex；
-- case sensitivity；
-- `file_glob`；
-- ignored files；
-- bounded output。
+- fake stdin/interaction tests 覆盖 empty、exit、EOF、top-level Ctrl+C；
+- active Run cancellation 后 Session 可继续；
+- FAILED/COMPLETED 后新 Run 可启动；
+- ask_user/permission presentation 不混淆。
 
 ### Suggested Commit
 
-`feat: add text search tool`
+`feat: make cli session persist across runs`
 
 ---
 
-## Step 14 — Conflict-Safe edit_file
+## M3 — 08 Evidence Closure
+
+## Step 17 — Fill Deterministic Contract-Test Gaps
 
 **Status:** TODO
 
 ### Goal
 
-实现 v1 primary mutation mechanism：
-
-> Exact Text Replacement with Expected Match Count.
+按 01–09 normative requirements 补齐 deterministic evidence；已实现行为只补证据，真实 contract failure 才修生产代码。
 
 ### Scope
 
-- `edit_file(path, old_text, new_text, expected_count)`；
-- `old_text` non-empty；
-- current file re-read at execution；
-- exact occurrence count；
-- match mismatch；
-- stale observation detection；
-- `expected_count > 1`；
-- line-ending preservation；
-- temporary sibling write；
-- replace original；
-- partial-write avoidance；
-- structured edit result。
+- concrete ModelClient serialization/normalization/error tests；
+- startup invariants and invalid config/workspace tests；
+- Base Prompt、prefix ordering、atomic eviction、history flag、overflow、Shell head/tail tests；
+- terminal interruption/recovery、retry snapshot、corrective semantics tests；
+- explicit constraints、workspace escape、protected/sensitive path、Runtime Secret、Shell timeout、risk decision no-side-effect tests；
+- CLI precedence、bounded rendering、redaction 与 Session control tests；
+- 对此前 hardening 项逐项验证，不因已有 commit 而跳过 evidence。
 
 ### Out of Scope
 
-- fuzzy matching；
-- line-number edit；
-- `apply_patch`；
-- AST edit；
-- generic overwrite。
+- 新 production subsystem；
+- architecture redesign；
+- 为测试建立 framework；
+- 把未实现 normative contract 直接标记 Deferred。
 
 ### Acceptance
 
-至少覆盖：
-
-- exact one match；
-- zero match；
-- multiple ambiguous matches；
-- `expected_count > 1`；
-- concurrent / stale content；
-- CRLF preservation；
-- write failure。
+- 每个发现的 gap 有 owner requirement、implementation 与 deterministic test；
+- malformed provider response、finish/completion terminal semantics、credential isolation 等边界均有 evidence；
+- full deterministic `pytest -q` green。
 
 ### Suggested Commit
 
-`feat: add conflict-safe exact file editing`
+`test: close v1 conformance evidence gaps`
 
 ---
 
-## Step 15 — create_file
+## Step 18 — Deterministic E2E and Traceability Closure
 
 **Status:** TODO
 
 ### Goal
 
-实现 create-only text file creation。
+用少量高价值 full-path tests 与 Lean Markdown mapping 完成 deterministic acceptance。
 
 ### Scope
 
-- `create_file(path, content)`；
-- NEW path resolution；
-- exclusive-create；
-- existing target → `FILE_ALREADY_EXISTS`；
-- parent must already exist；
-- UTF-8 write；
-- `bytes_written` result。
+- FakeModelClient + real Runtime + real Tools + real temporary workspace；
+- E2E A：inspect/search/read → edit → verification failure → adjust → verification pass → Final；
+- E2E B：Run1 interrupted → CANCELLED；same Session Run2 normal tool/final → COMPLETED；
+- 建立 `Requirement → Implementation → Test` 的 Lean traceability checklist；
+- 记录可解释的 workspace diff 与 command evidence。
 
 ### Out of Scope
 
-- overwrite；
-- `mkdir -p`；
-- directory Tool；
-- whole-file rewrite existing file。
+- requirements database/spreadsheet system；
+- large E2E matrix；
+- real-model nondeterministic acceptance；
+- new architecture。
 
 ### Acceptance
 
-- create success；
-- existing target rejection；
-- missing parent rejection；
-- race-safe exclusive create semantic。
+- 两条 deterministic E2E green；
+- lifecycle、mutation、verification observation 与 Session recovery 均通过真实组件路径；
+- 07–09 normative obligations 可追踪到 code + evidence；
+- full deterministic suite green。
 
 ### Suggested Commit
 
-`feat: add create-only file tool`
+`test: complete deterministic agent acceptance`
 
 ---
 
-## Step 16 — PreparedToolCall and Local Preparation
+## M4 — Real-Model Acceptance and Operational Tuning
 
-**Status:** TODO
+M2/M3 完成后，使用 real ModelClient、Runtime、Tools 与代表性小型 workspace 做少量普通用户风格 coding tasks。
 
-### Goal
+重点观察：
 
-将已有 LOCAL execution flow 正式收敛到 05 / 06 的：
+- `max_context_chars = 80_000` 是否导致过度 eviction、`history_incomplete` 与重复读取；
+- 24 model turns / 64 Tool attempts 是否适合 v1 primary use case；
+- ToolResult projection 是否保留完成任务所需信息；
+- Normal CLI 是否适合短演示。
 
-~~~text
-validation
-→ preparation
-→ PreparedToolCall
-→ later policy / execution
-~~~
+如 evidence 表明 80,000 需要调整，只能在 09 已有 validated public range 8,000..256,000 内调整 concrete default，不改变 Context architecture。此阶段不建立 tuner、benchmark framework 或新的 Runtime subsystem。
 
-### Scope
+M4 当前不是新的 numbered Step；完成 Step 18 后再依据 deterministic evidence 与真实任务结果制定最小验收记录。
 
-- PreparedToolCall frozen value object；
-- File dynamic facts；
-- resolved paths；
-- `affected_paths`；
-- sensitive / protected / containment facts；
-- Shell validated command / cwd facts；
-- `ShellSurfaceFacts`；
-- deterministic best-effort Shell surface classifier；
-- preparation failure → `OPERATION_FAILURE`；
-- unexpected preparation bug → `INTERNAL_TOOL_ERROR`。
+## Dependency Order
 
-Shell classifier 必须保持：
+```text
+Step 0   baseline
 
-- deterministic；
-- lexical / surface based；
-- best effort；
-- no LLM；
-- no full Shell AST parser；
-- facts only, no `ALLOW / CONFIRM / DENY` decision。
+Step 1   AgentConfig
+Step 2   Provider startup
+Step 3   Shell timeout/backend
+Step 4   File/discovery bounds
+Step 5   Shell capture head+tail
 
-例如可表达：
+Step 6   Context Run lifecycle
+Step 7   Atomic eviction + history_incomplete
+Step 8   Base Prompt + Effective System Prefix
+Step 9   ToolResult projection
+Step 10  Shell model projection
 
-- `recognized_actions`；
-- `has_compound_syntax`；
-- `has_unknown_segment`；
-- 03 policy 真正需要识别的 action facts。
+Step 11  Runtime ↔ Context integration
+Step 12  terminal cleanup / Session recovery
+Step 13  retry backoff / protocol limit
 
-### Out of Scope
+Step 14  observability seam
+Step 15  Normal/Debug CLI
+Step 16  interactive Session
 
-- PolicyEngine final decision；
-- permission UI；
-- generic action framework。
+Step 17  deterministic evidence closure
+Step 18  E2E + traceability
 
-### Acceptance
+M4       real-model acceptance / operational tuning
+```
 
-- prepared exact action 与后续 execution 使用同一 validated data；
-- outside workspace 是 policy fact；
-- preparation operational failure 与 policy fact 区分；
-- Shell classifier 能产出 typed surface facts。
-
-### Suggested Commit
-
-`refactor: prepare validated local tool actions`
-
----
-
-## Step 17 — Explicit Task Constraint Enforcement
-
-**Status:** TODO
-
-### Goal
-
-实现 04 定义的三个封闭 hard constraints。
-
-### Scope
-
-- `FORBID_FILE_MUTATION`；
-- `FORBID_COMMAND_EXECUTION`；
-- `WRITE_SCOPE`；
-- Runtime-owned normalized constraint state；
-- immutable constraint snapshot；
-- deterministic closed normalizer；
-- direct user input；
-- `ask_user` clarification answer trusted update path；
-- `PASS / REJECT` constraint check；
-- canonical path facts for `WRITE_SCOPE`。
-
-Normalizer 保持极小，只识别明确支持的形式，例如：
-
-- 不要修改文件；
-- 不要运行命令；
-- 只修改 `tests/`。
-
-无法可靠识别：
-
-~~~text
-→ semantic guidance
-or
-→ clarification
-~~~
-
-### Out of Scope
-
-- NLP parser；
-- LLM classifier；
-- policy DSL；
-- general task mode；
-- arbitrary authorization language。
-
-### Acceptance
-
-- file mutation forbidden；
-- command execution forbidden；
-- `WRITE_SCOPE` inside / outside；
-- model cannot modify hard constraints；
-- Risk Confirmation cannot override constraint rejection。
-
-### Suggested Commit
-
-`feat: enforce explicit task constraints`
-
----
-
-## Step 18 — Risk Permission Engine
-
-**Status:** TODO
-
-### Goal
-
-实现 03 的 deterministic Risk Permission：
-
-~~~text
-ALLOW
-CONFIRM
-DENY
-~~~
-
-### Scope
-
-- PolicyEngine；
-- File containment facts；
-- Sensitive / Protected path policy；
-- `ShellSurfaceFacts`；
-- recognizable Shell risk；
-- compound highest recognizable risk；
-- unknown / complex action behavior according to 03；
-- structured PermissionCheckResult。
-
-PolicyEngine 只判断，不：
-
-- execute；
-- interact with user；
-- mutate Run State；
-- call LLM。
-
-### Out of Scope
-
-- confirmation UI lifecycle；
-- new safety framework；
-- LLM safety judge；
-- Shell AST parser。
-
-### Acceptance
-
-- 针对 03 permission matrix 建立 deterministic tests；
-- constraint result 与 risk permission result 保持分层；
-- PolicyEngine 只返回 decision / facts。
-
-### Suggested Commit
-
-`feat: enforce runtime risk permissions`
-
----
-
-## Step 19 — Exact-Action Permission Confirmation
-
-**Status:** TODO
-
-### Goal
-
-实现 `CONFIRM` 的 `WAITING_FOR_USER` lifecycle 与 exact-action authorization。
-
-### Scope
-
-- PendingAction frozen value object；
-- exact validated action snapshot；
-- `WAITING_FOR_USER(PERMISSION_CONFIRMATION)`；
-- FakeUserInteraction；
-- `APPROVE`；
-- `REJECT`；
-- `CANCEL`；
-- one-time authorization；
-- cleanup；
-- approved action execution；
-- old batch fail-stop；
-- remaining calls `NOT_EXECUTED`。
-
-必须保证：
-
-~~~text
-approval executes stored exact action
-~~~
-
-而不是：
-
-~~~text
-approval
-→ ask model again
-→ model reconstructs command
-~~~
-
-### Out of Scope
-
-- `ask_user` clarification；
-- reusable permission grants；
-- session-wide approval。
-
-### Acceptance
-
-- approve；
-- reject；
-- cancel；
-- PendingAction cleanup；
-- changed / new action requires new policy evaluation。
-
-### Suggested Commit
-
-`feat: add exact-action permission confirmation`
-
----
-
-## Step 20 — ask_user InteractionTool
-
-**Status:** TODO
-
-### Goal
-
-实现 same-Run clarification。
-
-### Scope
-
-- `ask_user` Tool；
-- `ToolKind.INTERACTION`；
-- validation；
-- `WAITING_FOR_USER(CLARIFICATION)`；
-- `UserInteraction.ask`；
-- `ANSWERED`；
-- `CANCELLED`；
-- Runtime constructs `SUCCESS` ToolResult；
-- clarification ends old batch；
-- remaining calls `NOT_EXECUTED`；
-- clarification answer may enter trusted Task State update path when applicable。
-
-必须证明 `ask_user` 不经过：
-
-- PreparedToolCall；
-- Explicit Task Constraint；
-- Risk Permission；
-- `LocalTool.execute`；
-- ToolExecutionResult。
-
-### Out of Scope
-
-- permission confirmation as Tool；
-- `DECLINE` state。
-
-### Acceptance
-
-- answer → ToolResult → next Model Turn；
-- cancellation → `CANCELLED`；
-- same Run retained；
-- no duplicate UserMessage + ToolResult representation。
-
-### Suggested Commit
-
-`feat: add runtime clarification tool`
-
----
-
-## Step 21 — OpenAI-Compatible Model Client
-
-**Status:** TODO
-
-### Goal
-
-在 Runtime 已经能够完全通过 FakeModelClient 测试后，再接真实 LLM。
-
-### Scope
-
-- OpenAICompatibleModelClient；
-- ModelClient Protocol implementation；
-- SDK / API request；
-- InternalMessage → provider wire；
-- ToolSpec → native tool schema；
-- provider response → ModelResponse；
-- ToolCall normalization；
-- `call_id` preservation / generation as required by 05；
-- provider exception normalization；
-- `TransientProviderError`；
-- `FatalProviderError`；
-- `ModelProtocolError` boundary；
-- SDK automatic retry disabled where practical；
-- non-streaming complete response；
-- 不重新引入 ProviderAdapter。
-
-### Out of Scope
-
-- Runtime control flow changes；
-- streaming；
-- text ReAct parsing；
-- provider framework；
-- multiple-provider hierarchy。
-
-### Acceptance
-
-1. real provider no-tool Final smoke test；
-2. real provider `read_file` ToolCall smoke test；
-3. FakeModelClient tests 仍全部通过。
-
-### Suggested Commit
-
-`feat: add OpenAI-compatible model client`
-
----
-
-## Step 22 — CLI Composition Root
-
-**Status:** TODO
-
-### Goal
-
-将已有组件组装成真实可运行的本地 Coding Agent CLI。
-
-### Scope
-
-- config loading 基础；
-- workspace binding；
-- ToolRegistry；
-- concrete Tools；
-- ContextManager；
-- ModelClient；
-- PolicyEngine；
-- UserInteraction；
-- AgentRuntime；
-- composition root；
-- user task input；
-- Run execution；
-- final output；
-- 保持 CLI 极简。
-
-### Out of Scope
-
-- polished observability；
-- full 09 config matrix；
-- advanced terminal UI；
-- streaming display。
-
-### Acceptance
-
-用户可以在真实 workspace 启动：
-
-~~~text
-CLI
-→ AgentRuntime
-→ real model
-→ Tool
-→ final
-~~~
-
-### Suggested Commit
-
-`feat: wire agent components into CLI`
-
----
-
-## Step 23 — First Real Coding Task / M1 Completion
-
-**Status:** TODO
-
-### Goal
-
-用一个真实但小型的 coding task 验证 M1 vertical slice。
-
-目标 flow：
-
-~~~text
-inspect
-→ search/read
-→ edit/create if needed
-→ shell verification
-→ observe failure if any
-→ iterate
-→ final
-~~~
-
-### Scope
-
-- realistic small bug fix or small feature；
-- real LLM；
-- real workspace；
-- Tool loop；
-- verification command；
-- regression tests for bugs discovered during end-to-end run。
-
-这一步不是增加新架构。发现问题时优先修：
-
-- concrete bug；
-- schema mismatch；
-- Tool ergonomics blocker；
-- incorrect observation；
-- contract implementation bug。
-
-不要因为一次失败立刻增加：
-
-- planner；
-- patch framework；
-- plugin system；
-- async；
-- new abstraction。
-
-### Out of Scope
-
-- 新的 architecture subsystem；
-- 超出 01–06 的功能扩张；
-- 为单次失败引入未经证据支持的通用框架。
-
-### Acceptance
-
-至少一个真实任务能够完成完整：
-
-~~~text
-User
-→ Model
-→ inspect
-→ mutation
-→ verification
-→ Final
-~~~
-
-并且 Git diff / command evidence 可解释。
-
-### Suggested Commit
-
-`test: cover end-to-end coding agent workflow`
-
----
-
-## Milestone Mapping
-
-### M0 — Skeleton
-
-**Steps:** Step 0–4
-
-**Goal:** 建立基础 package、provider-neutral protocol、test seams 和最小 Context。
-
-### M1 — Vertical Slice
-
-**Steps:** Step 5–23
-
-最早 vertical slice 从 Step 8 就开始形成，之后持续增加真实能力；Step 23 表示 M1 的真实 coding-task 验收。M1 不意味着必须等到 Step 23 才第一次运行 Agent。
-
-### M2 — Core Runtime / Capabilities
-
-M1 完成后，根据 03–07 补齐尚未实现的 core contract。当前不提前细分 M2 的未来 Steps，也不制定新的 roadmap。
-
-### M3 — Hardening
-
-后续依据 implementation evidence 规划：
-
-- error hardening；
-- safety tests；
-- context limits；
-- permissions；
-- robustness。
-
-当前不展开具体 Steps。
-
-### M4 — Submission Polish
-
-后续对应：
-
-- README；
-- demo；
-- video；
-- submission checklist。
-
-当前不展开新的 Step 24+。
-
+顺序原则：先使 resource/config facts 有界，再建立 Context truth；随后接入 Runtime lifecycle，最后由 observer facts 驱动 CLI rendering，并由 08 evidence closure 验证完整 contract。不得为了先做易见的 Prompt 或 CLI 改动而绕过其依赖。
