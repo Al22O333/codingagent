@@ -144,6 +144,16 @@ def test_quoted_interpreter_code_is_not_shell_compound_syntax() -> None:
     assert facts.recognized_actions == frozenset()
 
 
+def test_echo_between_read_only_commands_is_a_known_safe_segment() -> None:
+    facts = classify_shell_surface(
+        'git status --short && echo "--- cached diff ---" && git diff --cached'
+    )
+
+    assert facts.has_compound_syntax is True
+    assert facts.has_unknown_segment is False
+    assert facts.recognized_actions == frozenset()
+
+
 def test_quote_awareness_keeps_external_compound_risk_visible() -> None:
     facts = classify_shell_surface(
         'python -c "value=1; print(value)" && git push origin main'

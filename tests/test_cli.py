@@ -677,6 +677,44 @@ def test_permission_resolution_does_not_render_a_second_confirmation_prompt() ->
     assert "允许执行" not in rendered
 
 
+def test_permission_rejection_tool_result_does_not_duplicate_resolution() -> None:
+    resolution = cli._render_event(
+        RuntimeEvent(
+            "permission_resolved",
+            {"call_id": "call", "decision": "REJECT"},
+        ),
+        debug=False,
+    )
+    tool_result = cli._render_event(
+        RuntimeEvent(
+            "tool_result",
+            {
+                "call_id": "call",
+                "outcome": "POLICY_REJECTED",
+                "error_code": "USER_REJECTED_CONFIRMATION",
+            },
+        ),
+        debug=False,
+        proposed_actions={"call": ("shell", "git add version.py")},
+    )
+
+    assert resolution == ("  ✗ 已拒绝本次操作",)
+    assert tool_result == ()
+
+
+def test_clarification_success_has_specific_human_result() -> None:
+    lines = cli._render_event(
+        RuntimeEvent(
+            "tool_result",
+            {"call_id": "ask", "outcome": "SUCCESS"},
+        ),
+        debug=False,
+        proposed_actions={"ask": ("ask_user", "requested")},
+    )
+
+    assert lines == ("  ✓ 已收到补充信息",)
+
+
 def test_composed_console_permission_has_one_prompt_and_one_resolution(
     tmp_path: Path,
 ) -> None:
@@ -705,6 +743,34 @@ def test_composed_console_permission_has_one_prompt_and_one_resolution(
     assert rendered.count("允许执行？") == 1
     assert rendered.count("已批准，仅限本次操作") == 1
     assert "ReadFileTool(" not in rendered
+
+
+def test_composed_console_rejection_has_one_human_result(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
+    output = StringIO()
+    client = FakeModelClient(
+        [
+            ModelResponse(
+                text=None,
+                tool_calls=(ToolCall("secret", "read_file", {"path": ".env"}),),
+            ),
+            ModelResponse(text="The requested read was rejected."),
+        ]
+    )
+    runtime = build_runtime(
+        _config(tmp_path),
+        model_client=client,
+        stdin=StringIO("n\n"),
+        stdout=output,
+    )
+
+    cli._run_task(runtime, "Inspect .env", output)
+
+    rendered = output.getvalue()
+    assert rendered.count("⚠ 需要确认") == 1
+    assert rendered.count("允许执行？") == 1
+    assert rendered.count("已拒绝本次操作") == 1
+    assert "你已拒绝本次操作" not in rendered
 
 
 def test_failed_shell_diagnostic_prefers_error_lines_and_stays_bounded() -> None:

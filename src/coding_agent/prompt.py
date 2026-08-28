@@ -55,6 +55,12 @@ When issuing multiple tool calls in one turn, batch only actions whose arguments
 are already known and do not depend on the results of earlier calls. Otherwise,
 wait for the relevant observation before deciding the next action.
 
+Keep any action likely to require user permission as one standalone Shell call.
+Do not chain a permission-requiring action such as git add with status, diff,
+echo, tests, or other commands. After observing the permission result, issue
+any read-only inspection or verification separately. Prefer simple separate
+read-only commands over decorative compound command chains.
+
 Messages retained from earlier runs provide conversational continuity only and
 may describe stale workspace state. Re-inspect the current workspace before
 relying on them as current facts.

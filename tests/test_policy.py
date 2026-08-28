@@ -226,6 +226,33 @@ def test_compound_command_uses_highest_recognizable_risk(tmp_path: Path) -> None
     assert policy.check_risk_permission(deny).decision is PermissionDecision.DENY
 
 
+def test_read_only_git_chain_with_echo_allows_but_git_add_chain_confirms(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tool = _shell_tool(WorkspacePathResolver(workspace))
+    read_only = _prepare(
+        tool,
+        "read-only",
+        ShellArguments(
+            command=(
+                'git status --short && echo "--- cached diff ---" '
+                "&& git diff --cached"
+            )
+        ),
+    )
+    staging = _prepare(
+        tool,
+        "staging",
+        ShellArguments(command="git add version.py && git status --short"),
+    )
+    policy = PolicyEngine()
+
+    assert policy.check_risk_permission(read_only).decision is PermissionDecision.ALLOW
+    assert policy.check_risk_permission(staging).decision is PermissionDecision.CONFIRM
+
+
 def test_ambiguous_complex_shell_confirms_but_simple_unknown_allows(
     tmp_path: Path,
 ) -> None:

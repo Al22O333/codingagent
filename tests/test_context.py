@@ -287,6 +287,8 @@ def test_effective_system_prefix_is_request_local_and_deterministically_ordered(
     assert "Use create_file only for a path" in normalized_prefix
     assert "explicitly says a required product behavior" in normalized_prefix
     assert "use ask_user before choosing or implementing" in normalized_prefix
+    assert "Keep any action likely to require user permission" in normalized_prefix
+    assert "Do not chain a permission-requiring action" in normalized_prefix
     assert "Do not claim an action or successful verification" in normalized_prefix
     assert prefix.index("REPEAT_WARNING") < prefix.index("CORRECTIVE_INSTRUCTION")
     assert prefix.endswith("CORRECTIVE_INSTRUCTION")

@@ -104,6 +104,7 @@ _SAFE_EXECUTABLES = frozenset(
         "clang++",
         "cmake",
         "dotnet",
+        "echo",
         "gcc",
         "g++",
         "go",
@@ -583,7 +584,12 @@ class ShellTool(Tool[ShellArguments]):
             raise ValueError("max_stderr_bytes must be at least 1")
         super().__init__(
             name="shell",
-            description="Execute a bounded, non-interactive local shell command",
+            description=(
+                "Execute one bounded, non-interactive local shell command. "
+                "Keep actions that may require permission, such as git add, "
+                "as standalone commands; run read-only status, diff, and tests "
+                "separately after observing the permission result."
+            ),
             argument_model=ShellArguments,
             kind=ToolKind.LOCAL,
             capabilities=frozenset({ToolCapability.COMMAND_EXECUTION}),

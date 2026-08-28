@@ -325,7 +325,11 @@ def _render_event(
                 lines.extend(f"    {line}" for line in _failure_excerpt(diagnostic))
         elif outcome != "NOT_EXECUTED":
             code = event.facts.get("error_code") or outcome
-            lines.append(f"  ✗ {_human_error(str(code))}")
+            if code not in {
+                "USER_REJECTED_CONFIRMATION",
+                "USER_CANCELLED_CONFIRMATION",
+            }:
+                lines.append(f"  ✗ {_human_error(str(code))}")
     elif event.kind == "context_truncated":
         lines.append("! 已裁剪较早的工作上下文")
     elif event.kind == "budget_exhausted":
@@ -401,6 +405,8 @@ def _normal_success_lines(
     tool_name: str,
     action: str,
 ) -> tuple[str, ...]:
+    if tool_name == "ask_user":
+        return ("  ✓ 已收到补充信息",)
     if tool_name != "shell":
         return (f"  ✓ {_normal_result_detail(event)}",)
     diagnostic = event.facts.get("diagnostic")
