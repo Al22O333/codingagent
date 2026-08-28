@@ -187,6 +187,10 @@ def test_trimming_drops_old_tool_groups_atomically_and_keeps_latest() -> None:
     assert first_results not in messages
     assert messages[-2:] == (second_call, second_result)
     assert sum(len(repr(message)) for message in messages) <= 750
+    assert context.history_incomplete is True
+
+    context.build_messages()
+    assert context.history_incomplete is True
 
 
 def test_mandatory_context_that_cannot_fit_fails_without_dropping_task() -> None:
@@ -221,6 +225,43 @@ def test_large_latest_tool_result_is_visible_after_older_group_is_evicted() -> N
     context.record_tool_result_message(latest_result)
 
     assert context.build_messages() == (task, latest_call, latest_result)
+
+
+def test_completed_run_continuity_is_evicted_before_current_run_units() -> None:
+    context = ContextManager(max_context_chars=180)
+    context.start_run(UserMessage("Old task"))
+    context.record_assistant_message(AssistantMessage("Old final"))
+    context.end_run(completed=True)
+    current = UserMessage("Current task" + "x" * 80)
+    context.start_run(current)
+
+    assert context.build_messages() == (current,)
+    assert context.history_incomplete is True
+
+
+def test_history_incomplete_resets_only_at_next_run_start() -> None:
+    context = ContextManager(max_context_chars=750)
+    context.start_run(UserMessage("Task"))
+    context.record_assistant_message(
+        AssistantMessage(None, (_tool_call("old"),))
+    )
+    context.record_tool_result_message(
+        ToolResultMessage((_tool_result_with_text("old", "x" * 1000),))
+    )
+    context.record_assistant_message(
+        AssistantMessage(None, (_tool_call("latest"),))
+    )
+    context.record_tool_result_message(
+        ToolResultMessage((_tool_result("latest"),))
+    )
+
+    context.build_messages()
+    assert context.history_incomplete is True
+    context.end_run(completed=False)
+    assert context.history_incomplete is True
+
+    context.start_run(UserMessage("Next task"))
+    assert context.history_incomplete is False
 
 
 def _tool_result_with_text(call_id: str, text: str) -> ToolResult:

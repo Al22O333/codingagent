@@ -38,6 +38,12 @@ class ContextManager:
         self._messages: list[InternalMessage] = []
         self._pending_tool_calls: dict[str, str] = {}
         self._run_active = False
+        self._history_incomplete = False
+
+    @property
+    def history_incomplete(self) -> bool:
+        """Whether this Run has permanently evicted model-visible history."""
+        return self._history_incomplete
 
     def start_run(self, message: UserMessage) -> None:
         """Start one Run with fresh transient history."""
@@ -46,6 +52,7 @@ class ContextManager:
         self._pending_tool_calls.clear()
         self._messages = [message]
         self._run_active = True
+        self._history_incomplete = False
 
     def end_run(self, *, completed: bool) -> None:
         """Finalize continuity and clear all current-Run transient state."""
@@ -117,6 +124,7 @@ class ContextManager:
             [*continuity, *current_units, *additional_units]
         ) > self._max_context_chars:
             continuity.pop(0)
+            self._history_incomplete = True
 
         protected = self._protected_current_unit_indexes(current_units)
         index = 0
@@ -130,6 +138,7 @@ class ContextManager:
                     "mandatory model-visible context exceeds max_context_chars"
                 )
             current_units.pop(index)
+            self._history_incomplete = True
             protected = {
                 protected_index - 1
                 if protected_index > index
