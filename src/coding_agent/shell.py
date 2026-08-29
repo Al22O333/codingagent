@@ -596,10 +596,13 @@ class ShellTool(Tool[ShellArguments]):
             raise ValueError("max_stdout_bytes must be at least 1")
         if max_stderr_bytes < 1:
             raise ValueError("max_stderr_bytes must be at least 1")
+        backend_name = Path(backend.executable).name or backend.executable
         super().__init__(
             name="shell",
             description=(
                 "Execute one bounded, non-interactive local shell command. "
+                f"The current shell backend is {backend_name}; use commands "
+                "and syntax compatible with that backend and platform. "
                 "Output is already bounded, so do not add pipes, tail, or "
                 "redirection only to shorten or merge displayed output. "
                 "Keep actions that may require permission, such as git add, "

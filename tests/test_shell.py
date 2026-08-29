@@ -69,6 +69,19 @@ def _execute(tool: ShellTool, arguments: ShellArguments):
     return tool.execute(prepared)
 
 
+def test_shell_spec_exposes_current_backend_and_compatibility_guidance(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tool = _tool(workspace, backend=ShellBackend("test-shell"))
+
+    description = tool.spec.description
+
+    assert "current shell backend is test-shell" in description
+    assert "compatible with that backend and platform" in description
+
+
 def test_exit_zero_captures_stdout_and_resolved_cwd(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     child = workspace / "child"

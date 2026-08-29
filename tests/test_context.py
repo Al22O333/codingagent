@@ -287,6 +287,9 @@ def test_effective_system_prefix_is_request_local_and_deterministically_ordered(
     assert "Use create_file only for a path" in normalized_prefix
     assert "Treat behavior constraints found in relevant workspace documentation" in normalized_prefix
     assert "Compatibility guarantees, boundary cases, invalid-input rules" in normalized_prefix
+    assert "perform an explicit requirement-coverage check" in normalized_prefix
+    assert "map each one to implementation evidence and verification evidence" in normalized_prefix
+    assert "verify both the accepted side and the rejected side" in normalized_prefix
     assert "Passing a limited visible test suite does not justify claiming success" in normalized_prefix
     assert "explicitly says a required product behavior" in normalized_prefix
     assert "use ask_user before choosing or implementing" in normalized_prefix
