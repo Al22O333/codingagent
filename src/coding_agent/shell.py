@@ -9,6 +9,7 @@ import re
 import signal
 import subprocess
 import threading
+import time
 from ctypes import Structure, byref, c_size_t, c_ulonglong, sizeof
 from ctypes import wintypes
 from dataclasses import dataclass
@@ -96,6 +97,7 @@ _COMPOUND_SYNTAX = re.compile(r"&&|\|\||[|;<>&]|\$\(|`|[\r\n]")
 _AMBIGUOUS_COMPOSITION = re.compile(r"[<>]|\$\(|`|[()]")
 _SEGMENT_SEPARATOR = re.compile(r"&&|\|\||[|;\r\n]")
 _TOKEN = re.compile(r'''"[^"]*"|'[^']*'|[^\s]+''')
+_PROCESS_WAIT_POLL_SECONDS = 0.1
 _SAFE_EXECUTABLES = frozenset(
     {
         "bash",
@@ -737,7 +739,7 @@ class ShellTool(Tool[ShellArguments]):
 
         timed_out = False
         try:
-            process.wait(timeout=timeout_seconds)
+            self._wait_for_process_interruptibly(process, timeout_seconds)
         except subprocess.TimeoutExpired:
             timed_out = True
             self._terminate_process_tree(process, windows_job)
@@ -802,6 +804,25 @@ class ShellTool(Tool[ShellArguments]):
     def _join_capture_threads(*threads: threading.Thread) -> None:
         for thread in threads:
             thread.join(timeout=5)
+
+    @staticmethod
+    def _wait_for_process_interruptibly(
+        process: subprocess.Popen[bytes],
+        timeout_seconds: int,
+    ) -> None:
+        """Wait in short slices so Windows can dispatch Ctrl+C promptly."""
+
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(process.args, timeout_seconds)
+            try:
+                process.wait(timeout=min(_PROCESS_WAIT_POLL_SECONDS, remaining))
+                return
+            except subprocess.TimeoutExpired:
+                if time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(process.args, timeout_seconds)
 
     @staticmethod
     def _terminate_process_tree(

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import _thread
 import os
 import shlex
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -199,6 +202,32 @@ def test_timeout_is_operation_failure_and_captures_partial_output(
     assert result.error.code == "COMMAND_TIMEOUT"
     assert isinstance(result.content, ShellContent)
     assert "started" in result.content.stdout
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Ctrl+C responsiveness regression")
+def test_windows_long_command_is_promptly_interruptible(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tool = _tool(
+        workspace,
+        default_timeout_seconds=30,
+        max_timeout_seconds=30,
+    )
+    arguments = ShellArguments(
+        command=_python_command("import time; time.sleep(20)"),
+    )
+    interrupt = threading.Timer(0.25, _thread.interrupt_main)
+    started_at = time.monotonic()
+    interrupt.start()
+
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            _execute(tool, arguments)
+    finally:
+        interrupt.cancel()
+        interrupt.join(timeout=1)
+
+    assert time.monotonic() - started_at < 5
 
 
 def test_timeout_schema_and_preparation_enforce_absolute_and_configured_caps(
