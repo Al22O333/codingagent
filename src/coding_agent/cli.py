@@ -44,6 +44,7 @@ from .search_text import SearchTextTool
 from .shell import ShellBackend, ShellTool
 from .tooling import ToolRegistry
 from .workspace import WorkspacePathResolver
+from .workspace_awareness import GitWorkspaceChangeObserver
 
 
 STARTUP_MESSAGE = "Coding Agent v1"
@@ -239,6 +240,9 @@ def build_runtime(
         user_interaction=concrete_interaction,
         observer=observer,
         runtime_secret_values=(config.api_key,),
+        workspace_change_observer=GitWorkspaceChangeObserver(
+            resolver.workspace_root
+        ),
     )
 
 
@@ -349,6 +353,30 @@ def _render_event(
         lines.append("! 已裁剪较早的工作上下文")
     elif event.kind == "completion_audit_started":
         lines.extend(("", "◆ 检查完成情况", ""))
+    elif event.kind == "workspace_change_summary":
+        state = event.facts.get("awareness_state")
+        pre_existing = int(event.facts.get("pre_existing_count") or 0)
+        known_touched = int(event.facts.get("known_touched_count") or 0)
+        new_or_other = int(event.facts.get("new_or_other_count") or 0)
+        uncertain = event.facts.get("attribution_uncertain") is True
+        if state == "AVAILABLE" and (
+            pre_existing or known_touched or new_or_other or uncertain
+        ):
+            lines.extend(
+                (
+                    "",
+                    "◆ 工作区变更",
+                    (
+                        f"  运行前已有 {pre_existing}，Agent 已触及 "
+                        f"{known_touched}，其他新增 {new_or_other}"
+                    ),
+                    (
+                        "  归因：不完全确定"
+                        if uncertain
+                        else "  归因：未发现未解释的变更"
+                    ),
+                )
+            )
     elif event.kind == "budget_exhausted":
         lines.append("! 运行达到资源限制")
     elif event.kind == "permission_resolved":

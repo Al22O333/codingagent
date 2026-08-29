@@ -1052,6 +1052,19 @@ completion_audit_finished
 
 这些 event 只携带 safe metadata，例如 Model Turn、触发 eligibility 的 capability、是否继续 Tool Loop和是否产生 Final；不得重复打印完整 Candidate、raw Context 或 Runtime Secret。Observer仍然 read-only、failure-isolated，不参与 audit control flow。
 
+### 29.2 Workspace Change Summary
+
+当 04 的 terminal `WorkspaceChangeFacts` 可用且至少存在一个 relevant path或uncertainty时，Normal CLI可以在 Final 前显示一个 concise trust summary，例如：
+
+```text
+Workspace changes: 1 pre-existing, 1 Agent-touched, 0 new/other
+Attribution uncertain: no
+```
+
+Normal只显示counts与uncertainty，不dump diff或完整path list。Debug可以显示bounded path lists和awareness state。non-Git / unavailable observer默认不在Normal制造warning noise；Debug仍可显示degraded state。
+
+该summary不声称semantic task success，不改变Final，不构成Git Tool family，也不提供mutation command。
+
 ---
 
 ### 30. ask_user Presentation
@@ -1740,6 +1753,7 @@ CLI展示 failure reason后：
 30. `--json` 只支持 one-shot；stdout 恰好一个稳定 JSON document，human/debug surface 与 prompt 使用 stderr。
 31. machine-readable output 只报告 lifecycle facts，不把 `COMPLETED` 伪装成 semantic task success。
 32. machine-readable error bounded、normalized、Secret-safe，不包含 raw exception、provider payload或完整 Tool history。
+33. Workspace change summary只展示04提供的conservative facts；Normal默认counts-only，Debug path lists bounded。
 
 ---
 

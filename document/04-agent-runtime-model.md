@@ -947,6 +947,48 @@ run_tests(...)
 
 ---
 
+### 11.3 Conservative Git Workspace Change Awareness
+
+当 composition root 为 Runtime 提供 bound-workspace Git observer 时，每个 Run 在首个 Model request 前与 terminal cleanup 时各执行一次 bounded、read-only snapshot。该观察只允许直接调用 Git read commands；不执行 stash、reset、checkout、clean、add、commit 或任何 workspace mutation。
+
+首版只在：
+
+```text
+canonical Git top-level == canonical bound workspace root
+```
+
+时形成 Git facts。non-Git workspace、workspace 只是更大 repository 的子目录、Git unavailable、timeout 或 malformed output 都 normal degrade，不阻止 Run，也不猜测 workspace 外状态。
+
+terminal `WorkspaceChangeFacts` 最小包含：
+
+```text
+awareness_state
+pre_existing_dirty_paths
+known_agent_touched_paths
+new_or_other_dirty_paths
+attribution_uncertain
+truncated
+```
+
+所有 path 使用 workspace-relative bounded representation；每组最多保留 200 个 path，单个 path 与总 observer event 继续 bounded。语义为：
+
+* `pre_existing_dirty_paths` 来自 Run-start Git snapshot；
+* `known_agent_touched_paths` 只记录成功 structured `FILE_MUTATION` execution 的 declared affected paths；
+* `new_or_other_dirty_paths` 是 terminal dirty paths 中既不在 start snapshot、也不属于 known touched paths 的部分；
+* `attribution_uncertain` 在任一 Shell execution attempt、failed mutation execution、snapshot unavailable / truncated、pre-existing 与 touched path overlap、或 unexplained terminal dirty path 存在时为 true。
+
+这些是 conservative trust facts，不是内容级 provenance。尤其：
+
+```text
+known touched != exclusively authored by Agent
+new/other != proven authored by user or Agent
+clean terminal != no meaningful action occurred
+```
+
+Runtime 不解析 diff hunks来归因同一文件不同区域，不自动改写模型 Final，也不把 Git awareness变成 safety boundary。Snapshot / attribution failure不得改变 Tool permission、Run lifecycle 或 workspace内容；只影响 terminal facts和human observability。
+
+---
+
 ## 12. Run Budgets
 
 v1 使用确定性的硬预算保证 Agent Run 不会无限运行。
@@ -1796,6 +1838,9 @@ v1 应保持以下运行时不变量：
 33. 每个 eligible Run 最多进入一次 bounded same-model completion self-audit；audit 中的 Tool Turns 继续使用原 Agent Loop、预算、约束、权限与 cancellation semantics。
 34. Self-audit active 后的下一个合法无 Tool 文本可以成为真正 Final；completion self-audit happened 不等于 verification succeeded，`COMPLETED` 仍不等于 task success。
 35. Candidate、internal provider reasoning continuation、audit flags 和 pending audit state 必须在 Run terminal cleanup 中清除，不得进入下一 Run 的 transient state。
+36. Optional Git workspace awareness 只执行 bounded read-only snapshot；non-Git、root mismatch或observer failure不得阻止Run。
+37. 只有成功 structured File Mutation 的affected paths属于known touched；Shell和失败mutation只增加attribution uncertainty，不产生虚假精确归因。
+38. Runtime不得stash、reset、checkout、clean、commit用户workspace，也不得用change awareness改写模型Final。
 
 ---
 

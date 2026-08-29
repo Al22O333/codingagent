@@ -67,7 +67,14 @@ from .tooling import (
     ToolRegistry,
     UnknownToolError,
 )
-from .workspace import WorkspacePathResolver
+from .workspace import FileOperationFacts, WorkspacePathResolver
+from .workspace_awareness import (
+    WorkspaceAwarenessState,
+    WorkspaceChangeFacts,
+    WorkspaceChangeObserver,
+    WorkspaceSnapshot,
+    build_workspace_change_facts,
+)
 
 
 def _bounded_observation_text(value: str, limit: int) -> str:
@@ -195,6 +202,13 @@ class AgentRun:
     completion_audit_required: bool = False
     completion_audit_active: bool = False
     pending_final_candidate: str | None = None
+    workspace_change_facts: WorkspaceChangeFacts | None = None
+    _workspace_start_snapshot: WorkspaceSnapshot | None = field(
+        default=None,
+        repr=False,
+    )
+    _known_agent_touched_paths: set[str] = field(default_factory=set, repr=False)
+    _workspace_execution_uncertain: bool = field(default=False, repr=False)
 
 
 @dataclass(slots=True)
@@ -232,6 +246,7 @@ class AgentRuntime:
         transport_retry_max_delay_seconds: float = 2.0,
         observer: Callable[[RuntimeEvent], object] | None = None,
         runtime_secret_values: tuple[str, ...] = (),
+        workspace_change_observer: WorkspaceChangeObserver | None = None,
     ) -> None:
         if (
             not isfinite(transport_retry_base_delay_seconds)
@@ -262,6 +277,7 @@ class AgentRuntime:
         self._runtime_secret_values = tuple(
             value for value in runtime_secret_values if value
         )
+        self._workspace_change_observer = workspace_change_observer
         self.session = Session()
 
     def run(self, task: str) -> AgentRun:
@@ -270,6 +286,7 @@ class AgentRuntime:
         run_started_at = self._clock()
         try:
             self.session._add_run(agent_run)
+            self._begin_workspace_awareness(agent_run)
             self._emit("run_started", run_id=agent_run.run_id)
             return self._run_until_terminal(agent_run, task, run_started_at)
         except KeyboardInterrupt:
@@ -301,6 +318,7 @@ class AgentRuntime:
                 RunState.FAILED,
                 RunState.CANCELLED,
             }:
+                self._finalize_workspace_awareness(agent_run)
                 self._clear_pending_state(agent_run)
                 self._context_manager.end_run(
                     completed=agent_run.state is RunState.COMPLETED
@@ -842,7 +860,7 @@ class AgentRuntime:
                 agent_run,
             )
 
-        return self._execute_prepared(tool, prepared)
+        return self._execute_prepared(tool, prepared, agent_run)
 
     def _ask_user(
         self,
@@ -942,7 +960,12 @@ class AgentRuntime:
             )
             if decision is ConfirmationDecision.APPROVE:
                 agent_run.state = RunState.RUNNING
-                return self._execute_prepared(tool, pending.prepared_call, ends_batch=True)
+                return self._execute_prepared(
+                    tool,
+                    pending.prepared_call,
+                    agent_run,
+                    ends_batch=True,
+                )
             if decision is ConfirmationDecision.REJECT:
                 agent_run.state = RunState.RUNNING
                 return self._dispatch_result(
@@ -976,13 +999,20 @@ class AgentRuntime:
         self,
         tool: LocalTool,
         prepared: PreparedToolCall,
+        agent_run: AgentRun,
         *,
         ends_batch: bool = False,
     ) -> _ToolDispatchResult:
 
+        capabilities = prepared.tool_identity.capabilities
+        if ToolCapability.COMMAND_EXECUTION in capabilities:
+            agent_run._workspace_execution_uncertain = True
+
         try:
             execution = tool.execute(prepared)
         except Exception:
+            if ToolCapability.FILE_MUTATION in capabilities:
+                agent_run._workspace_execution_uncertain = True
             return self._dispatch_result(self._operation_failure(
                 prepared.call_id,
                 prepared.tool_identity.name,
@@ -993,6 +1023,8 @@ class AgentRuntime:
             ))
 
         if not isinstance(execution, ToolExecutionResult):
+            if ToolCapability.FILE_MUTATION in capabilities:
+                agent_run._workspace_execution_uncertain = True
             return self._dispatch_result(self._operation_failure(
                 prepared.call_id,
                 prepared.tool_identity.name,
@@ -1002,6 +1034,7 @@ class AgentRuntime:
                 ),
             ))
 
+        self._record_file_execution_awareness(agent_run, prepared, execution)
         return self._dispatch_result(ToolResult(
             call_id=prepared.call_id,
             tool_name=prepared.tool_identity.name,
@@ -1009,6 +1042,68 @@ class AgentRuntime:
             content=execution.content,
             error=execution.error,
         ), ends_batch=ends_batch)
+
+    @staticmethod
+    def _record_file_execution_awareness(
+        agent_run: AgentRun,
+        prepared: PreparedToolCall,
+        execution: ToolExecutionResult,
+    ) -> None:
+        if ToolCapability.FILE_MUTATION not in prepared.tool_identity.capabilities:
+            return
+        facts = prepared.operation_facts
+        if (
+            execution.outcome is not ToolOutcome.SUCCESS
+            or not isinstance(facts, FileOperationFacts)
+            or not facts.affected_paths
+        ):
+            agent_run._workspace_execution_uncertain = True
+            return
+        for affected_path in facts.affected_paths:
+            relative_path = affected_path.workspace_relative_path
+            if relative_path is None:
+                agent_run._workspace_execution_uncertain = True
+            else:
+                agent_run._known_agent_touched_paths.add(relative_path)
+
+    def _begin_workspace_awareness(self, agent_run: AgentRun) -> None:
+        observer = self._workspace_change_observer
+        if observer is None:
+            return
+        try:
+            snapshot = observer.snapshot()
+        except Exception:
+            snapshot = WorkspaceSnapshot(WorkspaceAwarenessState.UNAVAILABLE)
+        agent_run._workspace_start_snapshot = snapshot
+
+    def _finalize_workspace_awareness(self, agent_run: AgentRun) -> None:
+        observer = self._workspace_change_observer
+        start = agent_run._workspace_start_snapshot
+        if observer is None or start is None:
+            return
+        try:
+            end = observer.snapshot()
+        except Exception:
+            end = WorkspaceSnapshot(WorkspaceAwarenessState.UNAVAILABLE)
+        facts = build_workspace_change_facts(
+            start,
+            end,
+            agent_run._known_agent_touched_paths,
+            execution_uncertain=agent_run._workspace_execution_uncertain,
+        )
+        agent_run.workspace_change_facts = facts
+        self._emit(
+            "workspace_change_summary",
+            awareness_state=facts.awareness_state.value,
+            pre_existing_count=len(facts.pre_existing_dirty_paths),
+            known_touched_count=len(facts.known_agent_touched_paths),
+            new_or_other_count=len(facts.new_or_other_dirty_paths),
+            attribution_uncertain=facts.attribution_uncertain,
+            truncated=facts.truncated,
+            pre_existing_paths=" | ".join(facts.pre_existing_dirty_paths),
+            known_touched_paths=" | ".join(facts.known_agent_touched_paths),
+            new_or_other_paths=" | ".join(facts.new_or_other_dirty_paths),
+        )
 
     def _emit_tool_result(self, result: ToolResult) -> None:
         facts: dict[str, str | int | float | bool | None] = {

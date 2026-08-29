@@ -1035,6 +1035,52 @@ def test_failed_shell_diagnostic_prefers_error_lines_and_stays_bounded() -> None
     assert len(rendered) < 1_000
 
 
+def test_workspace_change_summary_is_counts_only_in_normal_and_bounded_in_debug() -> None:
+    event = RuntimeEvent(
+        "workspace_change_summary",
+        {
+            "awareness_state": "AVAILABLE",
+            "pre_existing_count": 1,
+            "known_touched_count": 2,
+            "new_or_other_count": 1,
+            "attribution_uncertain": True,
+            "truncated": False,
+            "pre_existing_paths": "user-secret-name.txt",
+            "known_touched_paths": "a.py | b.py",
+            "new_or_other_paths": "other.txt",
+        },
+    )
+
+    normal = "\n".join(cli._render_event(event, debug=False))
+    debug = "\n".join(cli._render_event(event, debug=True))
+
+    assert "运行前已有 1" in normal
+    assert "Agent 已触及 2" in normal
+    assert "其他新增 1" in normal
+    assert "不完全确定" in normal
+    assert "user-secret-name.txt" not in normal
+    assert "user-secret-name.txt" in debug
+    assert len(debug) < 3_000
+
+
+def test_unavailable_workspace_awareness_is_normal_silent() -> None:
+    event = RuntimeEvent(
+        "workspace_change_summary",
+        {
+            "awareness_state": "NOT_GIT",
+            "pre_existing_count": 0,
+            "known_touched_count": 0,
+            "new_or_other_count": 0,
+            "attribution_uncertain": True,
+        },
+    )
+
+    assert cli._render_event(event, debug=False) == ()
+    assert "workspace_change_summary" in "\n".join(
+        cli._render_event(event, debug=True)
+    )
+
+
 def test_cli_provider_failure_is_understandable_and_does_not_leak_secret(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
