@@ -97,6 +97,7 @@ _COMPOUND_SYNTAX = re.compile(r"&&|\|\||[|;<>&]|\$\(|`|[\r\n]")
 _AMBIGUOUS_COMPOSITION = re.compile(r"[<>]|\$\(|`|[()]")
 _SEGMENT_SEPARATOR = re.compile(r"&&|\|\||[|;\r\n]")
 _TOKEN = re.compile(r'''"[^"]*"|'[^']*'|[^\s]+''')
+_BENIGN_STREAM_MERGE = re.compile(r"(?<!\S)2>&1(?=\s|$)")
 _PROCESS_WAIT_POLL_SECONDS = 0.1
 _SAFE_EXECUTABLES = frozenset(
     {
@@ -131,7 +132,9 @@ _SAFE_EXECUTABLES = frozenset(
 def classify_shell_surface(command: str) -> ShellSurfaceFacts:
     """Recognize common risk-relevant command surface without parsing a shell AST."""
     actions: set[ShellRiskAction] = set()
-    surface_command = _mask_quoted_metacharacters(command)
+    surface_command = _mask_benign_stream_merges(
+        _mask_quoted_metacharacters(command)
+    )
     nested_shell = _is_nested_shell_invocation(command)
     has_compound_syntax = bool(_COMPOUND_SYNTAX.search(surface_command)) or (
         nested_shell and bool(_COMPOUND_SYNTAX.search(command))
@@ -204,6 +207,15 @@ def _mask_quoted_metacharacters(command: str) -> str:
         rendered.append(" " if character in "|;<>&()\r\n" else character)
         index += 1
     return "".join(rendered)
+
+
+def _mask_benign_stream_merges(command: str) -> str:
+    """Mask only an exact stderr-to-stdout merge; other redirects stay visible."""
+
+    return _BENIGN_STREAM_MERGE.sub(
+        lambda match: " " * len(match.group(0)),
+        command,
+    )
 
 
 def _is_nested_shell_invocation(command: str) -> bool:
@@ -588,6 +600,8 @@ class ShellTool(Tool[ShellArguments]):
             name="shell",
             description=(
                 "Execute one bounded, non-interactive local shell command. "
+                "Output is already bounded, so do not add pipes, tail, or "
+                "redirection only to shorten or merge displayed output. "
                 "Keep actions that may require permission, such as git add, "
                 "as standalone commands; run read-only status, diff, and tests "
                 "separately after observing the permission result."

@@ -61,6 +61,12 @@ echo, tests, or other commands. After observing the permission result, issue
 any read-only inspection or verification separately. Prefer simple separate
 read-only commands over decorative compound command chains.
 
+Shell output is already bounded by the Runtime. Do not add pipes, tail, head,
+or redirection such as 2>&1 merely to shorten or merge displayed output. Run
+the underlying command directly when its raw output is acceptable, and avoid
+platform-specific output-filtering commands unless the workspace task itself
+requires them and their availability has been observed.
+
 Messages retained from earlier runs provide conversational continuity only and
 may describe stale workspace state. Re-inspect the current workspace before
 relying on them as current facts.

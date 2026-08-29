@@ -279,6 +279,20 @@ def test_ambiguous_complex_shell_confirms_but_simple_unknown_allows(
     assert simple_result.decision is PermissionDecision.ALLOW
 
 
+def test_test_command_with_exact_stream_merge_is_allowed(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    prepared = _prepare(
+        _shell_tool(WorkspacePathResolver(workspace)),
+        "tests",
+        ShellArguments(command="python -m unittest -v 2>&1"),
+    )
+
+    result = PolicyEngine().check_risk_permission(prepared)
+
+    assert result.decision is PermissionDecision.ALLOW
+
+
 def test_quoted_python_statement_separators_do_not_require_confirmation(
     tmp_path: Path,
 ) -> None:

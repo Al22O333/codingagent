@@ -157,6 +157,31 @@ def test_echo_between_read_only_commands_is_a_known_safe_segment() -> None:
     assert facts.recognized_actions == frozenset()
 
 
+def test_exact_stderr_to_stdout_merge_is_not_ambiguous_composition() -> None:
+    facts = classify_shell_surface("python -m unittest -v 2>&1")
+
+    assert facts.has_compound_syntax is False
+    assert facts.has_unknown_segment is False
+    assert facts.recognized_actions == frozenset()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python diagnostics.py 2>&1 | tail -n 5",
+        "python diagnostics.py > diagnostics.log 2>&1",
+        "python diagnostics.py 1>&2",
+    ],
+)
+def test_stream_merge_does_not_hide_other_ambiguous_composition(
+    command: str,
+) -> None:
+    facts = classify_shell_surface(command)
+
+    assert facts.has_compound_syntax is True
+    assert facts.has_unknown_segment is True
+
+
 def test_quote_awareness_keeps_external_compound_risk_visible() -> None:
     facts = classify_shell_surface(
         'python -c "value=1; print(value)" && git push origin main'
