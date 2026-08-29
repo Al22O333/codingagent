@@ -649,6 +649,20 @@ Final不得：
 * 把 targeted verification称为 full-suite verification；
 * 隐藏已知的重要 limitation。
 
+### 18.1 Factual Change and Command Review
+
+CLI可以在用户显式请求时，把04的 terminal workspace-change facts与实际 Shell execution facts投影为 bounded review。该 review用于核对“哪些 path 被观察到”“哪些 command实际执行、结果为何”，不得创建 Runtime verification grade。
+
+Review必须区分：
+
+```text
+command outcome / exit code
+!=
+verification sufficiency
+```
+
+因此 test-like command的 exit 0只是一条 observed execution evidence；它不证明测试选择充分、要求覆盖完整或后续 mutation没有使证据 stale。Review不包含 stdout/stderr或 content-bearing Tool arguments，且必须明确标注 `verification_sufficiency = NOT_INFERRED`。模型 Final仍负责说明实际验证范围与限制。
+
 ---
 
 ## Agent Testing

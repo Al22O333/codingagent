@@ -302,6 +302,8 @@ CLI rendering
 
 逻辑。
 
+Runtime 可以在 mutable `AgentRun` 上组装04定义的 bounded command-execution facts，因为它知道 prepared Shell call是否真正跨过 execution boundary。该组装不得保存 stdout/stderr、不得进行 verification语义分类，也不得改变 ToolResult、Policy或 lifecycle。CLI只读取 terminal Run facts并负责 opt-in rendering。
+
 ---
 
 ### 4.2 ContextManager

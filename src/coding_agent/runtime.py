@@ -60,7 +60,7 @@ from .protocol import (
 )
 from .read_file import ReadFileContent
 from .search_text import SearchTextContent
-from .shell import ShellContent
+from .shell import ShellContent, ShellOperationFacts
 from .tooling import (
     LocalTool,
     PreparedToolCall,
@@ -86,6 +86,10 @@ def _bounded_observation_text(value: str, limit: int) -> str:
     head = retained * 2 // 3
     tail = retained - head
     return value[:head] + marker + (value[-tail:] if tail else "")
+
+
+MAX_COMMAND_EVIDENCE = 32
+MAX_COMMAND_EVIDENCE_CHARS = 500
 
 
 class RunState(StrEnum):
@@ -170,6 +174,24 @@ class RequiredInteraction:
 
 
 @dataclass(frozen=True, slots=True)
+class CommandExecutionEvidence:
+    """Bounded factual evidence for one Shell call that reached execution."""
+
+    command: str
+    cwd: str
+    outcome: ToolOutcome | None
+    exit_code: int | None = None
+    error_code: str | None = None
+    interrupted: bool = False
+
+    def __post_init__(self) -> None:
+        if self.interrupted != (self.outcome is None):
+            raise ValueError(
+                "interrupted command evidence must have no Tool outcome"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class _ToolDispatchResult:
     result: ToolResult
     ends_batch: bool
@@ -227,6 +249,10 @@ class AgentRun:
     pending_final_candidate: str | None = None
     workspace_change_facts: WorkspaceChangeFacts | None = None
     required_interaction: RequiredInteraction | None = None
+    command_execution_evidence: list[CommandExecutionEvidence] = field(
+        default_factory=list
+    )
+    command_evidence_truncated: bool = False
     _workspace_start_snapshot: WorkspaceSnapshot | None = field(
         default=None,
         repr=False,
@@ -1082,38 +1108,113 @@ class AgentRuntime:
 
         try:
             execution = tool.execute(prepared)
+        except KeyboardInterrupt:
+            self._record_interrupted_command(agent_run, prepared)
+            raise
         except Exception:
             if ToolCapability.FILE_MUTATION in capabilities:
                 agent_run._workspace_execution_uncertain = True
-            return self._dispatch_result(self._operation_failure(
+            failed = self._operation_failure(
                 prepared.call_id,
                 prepared.tool_identity.name,
                 ToolError(
                     code="INTERNAL_TOOL_ERROR",
                     message="local tool execution failed unexpectedly",
                 ),
-            ))
+            )
+            self._record_command_execution(agent_run, prepared, failed)
+            return self._dispatch_result(failed)
 
         if not isinstance(execution, ToolExecutionResult):
             if ToolCapability.FILE_MUTATION in capabilities:
                 agent_run._workspace_execution_uncertain = True
-            return self._dispatch_result(self._operation_failure(
+            failed = self._operation_failure(
                 prepared.call_id,
                 prepared.tool_identity.name,
                 ToolError(
                     code="INTERNAL_TOOL_ERROR",
                     message="local tool returned an invalid execution result",
                 ),
-            ))
+            )
+            self._record_command_execution(agent_run, prepared, failed)
+            return self._dispatch_result(failed)
 
         self._record_file_execution_awareness(agent_run, prepared, execution)
-        return self._dispatch_result(ToolResult(
+        result = ToolResult(
             call_id=prepared.call_id,
             tool_name=prepared.tool_identity.name,
             outcome=execution.outcome,
             content=execution.content,
             error=execution.error,
-        ), ends_batch=ends_batch)
+        )
+        self._record_command_execution(agent_run, prepared, result)
+        return self._dispatch_result(result, ends_batch=ends_batch)
+
+    def _record_command_execution(
+        self,
+        agent_run: AgentRun,
+        prepared: PreparedToolCall,
+        result: ToolResult,
+    ) -> None:
+        facts = prepared.operation_facts
+        if not isinstance(facts, ShellOperationFacts):
+            return
+        if len(agent_run.command_execution_evidence) >= MAX_COMMAND_EVIDENCE:
+            agent_run.command_evidence_truncated = True
+            return
+        content = result.content
+        command = content.command if isinstance(content, ShellContent) else facts.command
+        cwd = (
+            content.cwd
+            if isinstance(content, ShellContent)
+            else facts.cwd.workspace_relative_path or "."
+        )
+        agent_run.command_execution_evidence.append(
+            CommandExecutionEvidence(
+                command=_bounded_observation_text(
+                    self._redact_runtime_secrets(command),
+                    MAX_COMMAND_EVIDENCE_CHARS,
+                ),
+                cwd=_bounded_observation_text(
+                    self._redact_runtime_secrets(cwd),
+                    MAX_COMMAND_EVIDENCE_CHARS,
+                ),
+                outcome=result.outcome,
+                exit_code=(
+                    content.exit_code if isinstance(content, ShellContent) else None
+                ),
+                error_code=result.error.code if result.error is not None else None,
+            )
+        )
+
+    def _record_interrupted_command(
+        self,
+        agent_run: AgentRun,
+        prepared: PreparedToolCall,
+    ) -> None:
+        facts = prepared.operation_facts
+        if not isinstance(facts, ShellOperationFacts):
+            return
+        if len(agent_run.command_execution_evidence) >= MAX_COMMAND_EVIDENCE:
+            agent_run.command_evidence_truncated = True
+            return
+        agent_run.command_execution_evidence.append(
+            CommandExecutionEvidence(
+                command=_bounded_observation_text(
+                    self._redact_runtime_secrets(facts.command),
+                    MAX_COMMAND_EVIDENCE_CHARS,
+                ),
+                cwd=_bounded_observation_text(
+                    self._redact_runtime_secrets(
+                        facts.cwd.workspace_relative_path or "."
+                    ),
+                    MAX_COMMAND_EVIDENCE_CHARS,
+                ),
+                outcome=None,
+                error_code="USER_CANCELLATION",
+                interrupted=True,
+            )
+        )
 
     @staticmethod
     def _record_file_execution_awareness(
@@ -1351,6 +1452,9 @@ class AgentRuntime:
 __all__ = [
     "AgentRun",
     "AgentRuntime",
+    "CommandExecutionEvidence",
+    "MAX_COMMAND_EVIDENCE",
+    "MAX_COMMAND_EVIDENCE_CHARS",
     "ModelProtocolError",
     "RuntimeLimits",
     "RuntimeEvent",

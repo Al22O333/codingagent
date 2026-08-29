@@ -1013,6 +1013,10 @@ clean terminal != no meaningful action occurred
 
 Runtime 不解析 diff hunks来归因同一文件不同区域，不自动改写模型 Final，也不把 Git awareness变成 safety boundary。Snapshot / attribution failure不得改变 Tool permission、Run lifecycle 或 workspace内容；只影响 terminal facts和human observability。
 
+为支持显式 user review，`AgentRun` 还可以保留 bounded `CommandExecutionEvidence`：只记录实际进入 Shell `execute` boundary 的 command、workspace-relative cwd、normalized Tool outcome、exit code与 error code；已进入 execution但被用户中断的 attempt记录为 `INTERRUPTED / USER_CANCELLATION`。Validation failure、Policy deny/reject或尚待 permission 的 action不构成 execution evidence。Command evidence必须在存入 Run前进行 Runtime Secret redaction，不包含 stdout/stderr，最多保留32项、单项 command/cwd最多500字符，并以 truncation fact表示超限。它不进入跨进程 Session continuity。
+
+这些 facts 不推导 `verification_success`。Exit 0、test-like presentation label或多条 command evidence都不能让 Runtime声称 verification充分；08的 evidence/claim discipline仍由模型负责。
+
 ---
 
 ## 12. Run Budgets

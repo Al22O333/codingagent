@@ -862,7 +862,10 @@ def test_session_delete_is_exact_model_free_and_missing_is_deterministic(
     assert not (session_directory / f"{session_id}.json").exists()
 
 
-@pytest.mark.parametrize("extra", [["task"], ["--non-interactive"]])
+@pytest.mark.parametrize(
+    "extra",
+    [["task"], ["--non-interactive"], ["--review"]],
+)
 def test_session_management_rejects_run_arguments_before_model_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1263,6 +1266,9 @@ def test_shell_rendering_is_bounded_and_redacts_runtime_credential(
     [
         ("pytest -q", "test"),
         ("python -m pytest -q", "test"),
+        ("python -B -m unittest -q", "test"),
+        ("python -u -m pytest -q", "test"),
+        ("python -O -m pytest -q", None),
         ("ruff check src", "check"),
         ("cargo build", "build"),
         ("npm run build", "build"),

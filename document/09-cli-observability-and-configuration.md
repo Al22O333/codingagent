@@ -1522,6 +1522,40 @@ Human mode 显示 bounded session ID。`--json` 与 persistence/resume组合时�
 
 Management JSON 是独立 schema-versioned document。List 返回 `operation=list_sessions`、`workspace_identity`、metadata-only `sessions` array与 `skipped_invalid_entries`；delete返回 `operation=delete_session`、exact `session_id`与 `deleted=true`。管理失败沿用 no-Run startup failure document且 process exit code为 `2`。
 
+### 42.4 Opt-In Change and Command Review
+
+CLI支持：
+
+```text
+coding-agent --workspace <PATH> --review <task...>
+coding-agent --workspace <PATH> --json --review <one-shot task...>
+```
+
+`--review` 也可与 `--non-interactive`、`--persist-session`或 `--resume`组合；它不适用于 model-free list/delete management。没有该 flag时，既有 human presentation与JSON document shape保持不变。
+
+Human terminal在Run终止后增加一个“变更与命令证据”块。Machine result增加一个 bounded `review` object：
+
+```text
+workspace_changes
+  awareness_state
+  pre_existing_dirty_paths
+  known_agent_touched_paths
+  new_or_other_dirty_paths
+  attribution_uncertain
+  paths_truncated
+command_evidence[]
+  command
+  cwd
+  outcome
+  exit_code
+  error_code
+  presentation_category
+command_evidence_truncated
+verification_sufficiency = NOT_INFERRED
+```
+
+Path每组最多投影50项；Runtime最多保留32条实际 Shell execution，command/cwd各500字符；已进入 execution后被取消的命令显示为 `INTERRUPTED`。所有文本在输出前再次做 Runtime Secret redaction，human terminal使用安全 quoting。Review不包含 stdout/stderr、edit content、未执行的 permission action、PendingAction或 provider payload。`presentation_category`只复用现有高置信 UI label，不是 verification判定；exit 0也不自动证明验证充分性。
+
 ---
 
 ## Interactive CLI and Session Control

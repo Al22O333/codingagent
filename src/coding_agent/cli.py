@@ -68,6 +68,7 @@ _DEFAULT_SECRET_ENVIRONMENT_NAMES = frozenset(
     {"CODING_AGENT_API_KEY", "OPENAI_API_KEY"}
 )
 _MAX_SHELL_TIMEOUT_SECONDS = 5 * 60
+_MAX_REVIEW_PATHS = 50
 
 
 def _platform_shell_executable() -> str:
@@ -507,15 +508,25 @@ def _classify_shell_presentation(command: str) -> str | None:
         tokens = shlex.split(command, posix=False)
     except ValueError:
         return None
-    normalized = [token.strip('"\'').casefold() for token in tokens]
+    unquoted = [token.strip('"\'') for token in tokens]
+    normalized = [token.casefold() for token in unquoted]
     if not normalized:
         return None
     executable = os.path.basename(normalized[0])
     target = executable
     if executable in {"python", "python.exe", "python3", "python3.exe"}:
-        if len(normalized) < 3 or normalized[1] != "-m":
+        module_index = 1
+        while (
+            module_index < len(unquoted)
+            and unquoted[module_index] in {"-B", "-u"}
+        ):
+            module_index += 1
+        if (
+            len(normalized) <= module_index + 1
+            or normalized[module_index] != "-m"
+        ):
             return None
-        target = normalized[2]
+        target = normalized[module_index + 1]
     if target in {"pytest", "unittest", "tox"}:
         return "test"
     if target in {"ruff", "mypy", "pyright", "eslint"}:
@@ -653,6 +664,11 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="run one task without ever reading user input",
     )
+    parser.add_argument(
+        "--review",
+        action="store_true",
+        help="include bounded factual workspace-change and command evidence",
+    )
     persistence = parser.add_mutually_exclusive_group()
     persistence.add_argument(
         "--persist-session",
@@ -692,9 +708,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     session_management = args.list_sessions or args.delete_session is not None
     if session_management:
-        if args.task or args.non_interactive:
+        if args.task or args.non_interactive or args.review:
             code = "SESSION_MANAGEMENT_ARGUMENT_CONFLICT"
-            message = "session management does not accept a task or --non-interactive"
+            message = (
+                "session management does not accept a task, --non-interactive, "
+                "or --review"
+            )
             if args.json:
                 _write_json_document(
                     _startup_failure_document(code, message),
@@ -788,6 +807,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             _run_json_document(
                 run,
                 secret_values=(config.api_key, *startup_secret_values),
+                include_review=args.review,
                 session_id=(
                     runtime.session.session_id
                     if session_store is not None
@@ -813,6 +833,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             session_store=session_store,
             config=config,
             secret_values=(config.api_key, *startup_secret_values),
+            include_review=args.review,
         )
 
     while True:
@@ -833,6 +854,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             session_store=session_store,
             config=config,
             secret_values=(config.api_key, *startup_secret_values),
+            include_review=args.review,
         )
 
 
@@ -921,6 +943,7 @@ def _run_task(
     session_store: SessionStore | None = None,
     config: CLIConfig | None = None,
     secret_values: tuple[str, ...] = (),
+    include_review: bool = False,
 ) -> int:
     stdout.write(_UI_TEXT["running"] + "\n")
     stdout.flush()
@@ -937,15 +960,23 @@ def _run_task(
         stdout.write(f"{run.final_response}\n")
         if session_error is not None:
             stdout.write(f"\nSession checkpoint failed: {session_error['message']}\n")
+            if include_review:
+                _write_run_review(run, stdout, secret_values=secret_values)
             return 1
+        if include_review:
+            _write_run_review(run, stdout, secret_values=secret_values)
         return 0
     if run.state is RunState.CANCELLED:
         stdout.write(f"\n{_DIVIDER}\n— 已取消本次运行\n{_DIVIDER}\n")
+        if include_review:
+            _write_run_review(run, stdout, secret_values=secret_values)
         return 130
     stdout.write(f"\n{_DIVIDER}\n✗ 本次运行失败\n{_DIVIDER}\n\n")
     stdout.write("原因：" + _failure_message(run.termination_reason, run.limit_reached) + "\n")
     if run.required_interaction is not None:
         stdout.write(_render_required_interaction(run) + "\n")
+    if include_review:
+        _write_run_review(run, stdout, secret_values=secret_values)
     return _run_exit_code(run)
 
 
@@ -953,6 +984,7 @@ def _run_json_document(
     run: AgentRun,
     *,
     secret_values: tuple[str, ...],
+    include_review: bool = False,
     session_id: str | None = None,
     session_checkpoint_updated: bool = False,
     session_error: dict[str, str] | None = None,
@@ -1016,7 +1048,155 @@ def _run_json_document(
             else None,
             "exact_scope": required.exact_scope,
         }
+    if include_review:
+        document["review"] = _run_review_document(
+            run,
+            secret_values=secret_values,
+        )
     return document
+
+
+def _run_review_document(
+    run: AgentRun,
+    *,
+    secret_values: tuple[str, ...],
+) -> dict[str, object]:
+    """Project bounded facts without inferring semantic verification success."""
+
+    workspace_changes: dict[str, object] | None = None
+    facts = run.workspace_change_facts
+    if facts is not None:
+        pre_existing = _review_paths(facts.pre_existing_dirty_paths, secret_values)
+        known_touched = _review_paths(facts.known_agent_touched_paths, secret_values)
+        new_or_other = _review_paths(facts.new_or_other_dirty_paths, secret_values)
+        workspace_changes = {
+            "awareness_state": facts.awareness_state.value,
+            "pre_existing_dirty_paths": list(pre_existing),
+            "known_agent_touched_paths": list(known_touched),
+            "new_or_other_dirty_paths": list(new_or_other),
+            "attribution_uncertain": facts.attribution_uncertain,
+            "paths_truncated": (
+                facts.truncated
+                or len(facts.pre_existing_dirty_paths) > _MAX_REVIEW_PATHS
+                or len(facts.known_agent_touched_paths) > _MAX_REVIEW_PATHS
+                or len(facts.new_or_other_dirty_paths) > _MAX_REVIEW_PATHS
+            ),
+        }
+    command_evidence = []
+    for evidence in run.command_execution_evidence:
+        presentation_command = evidence.command.replace("<redacted>", "REDACTED")
+        command = _bounded_head_tail(
+            _redact_values(evidence.command, secret_values),
+            500,
+        )
+        command_evidence.append(
+            {
+                "command": command,
+                "cwd": _bounded_head_tail(
+                    _redact_values(evidence.cwd, secret_values),
+                    500,
+                ),
+                "outcome": (
+                    "INTERRUPTED"
+                    if evidence.interrupted
+                    else evidence.outcome.value
+                    if evidence.outcome is not None
+                    else "OPERATION_FAILURE"
+                ),
+                "exit_code": evidence.exit_code,
+                "error_code": evidence.error_code,
+                "presentation_category": (
+                    _classify_shell_presentation(presentation_command) or "command"
+                ),
+            }
+        )
+    return {
+        "workspace_changes": workspace_changes,
+        "command_evidence": command_evidence,
+        "command_evidence_truncated": run.command_evidence_truncated,
+        "verification_sufficiency": "NOT_INFERRED",
+    }
+
+
+def _review_paths(
+    paths: Sequence[str],
+    secret_values: tuple[str, ...],
+) -> tuple[str, ...]:
+    return tuple(
+        _bounded_head_tail(_redact_values(path, secret_values), 500)
+        for path in paths[:_MAX_REVIEW_PATHS]
+    )
+
+
+def _write_run_review(
+    run: AgentRun,
+    stdout: TextIO,
+    *,
+    secret_values: tuple[str, ...],
+) -> None:
+    """Write one terminal-safe opt-in factual review after a terminal Run."""
+
+    review = _run_review_document(run, secret_values=secret_values)
+    stdout.write(f"\n{_DIVIDER}\n◆ 变更与命令证据\n{_DIVIDER}\n")
+    changes = review["workspace_changes"]
+    if isinstance(changes, dict):
+        state = changes["awareness_state"]
+        if state == "AVAILABLE":
+            path_groups = (
+                ("运行前已有", changes["pre_existing_dirty_paths"]),
+                ("Agent 已触及", changes["known_agent_touched_paths"]),
+                ("其他新增", changes["new_or_other_dirty_paths"]),
+            )
+            rendered_any = False
+            for label, raw_paths in path_groups:
+                if isinstance(raw_paths, list) and raw_paths:
+                    rendered_any = True
+                    rendered = ", ".join(
+                        json.dumps(path, ensure_ascii=False) for path in raw_paths
+                    )
+                    stdout.write(f"{label}：{rendered}\n")
+            if not rendered_any:
+                stdout.write("工作区：未观察到 dirty path\n")
+            attribution = (
+                "不完全确定"
+                if changes["attribution_uncertain"]
+                else "未发现未解释的变更"
+            )
+            stdout.write(f"变更归因：{attribution}\n")
+            if changes["paths_truncated"]:
+                stdout.write("路径列表：已按上限截断\n")
+        else:
+            stdout.write(f"工作区变更：Git awareness {state}，无法精确列出\n")
+    else:
+        stdout.write("工作区变更：未启用 awareness\n")
+
+    commands = review["command_evidence"]
+    if isinstance(commands, list) and commands:
+        stdout.write("实际命令：\n")
+        for item in commands:
+            if not isinstance(item, dict):
+                continue
+            exit_part = (
+                f" exit={item['exit_code']}"
+                if item.get("exit_code") is not None
+                else ""
+            )
+            error_part = (
+                f" error={item['error_code']}"
+                if item.get("error_code") is not None
+                else ""
+            )
+            command = json.dumps(item["command"], ensure_ascii=False)
+            cwd = json.dumps(item["cwd"], ensure_ascii=False)
+            stdout.write(
+                f"  [{item['outcome']}{exit_part}{error_part}] "
+                f"cwd={cwd} command={command}\n"
+            )
+    else:
+        stdout.write("实际命令：无\n")
+    if review["command_evidence_truncated"]:
+        stdout.write("命令证据：已按上限截断\n")
+    stdout.write("说明：命令结果是执行证据，不自动证明验证充分性。\n")
 
 
 def _checkpoint_session(
