@@ -179,6 +179,7 @@ def build_runtime(
     user_interaction: UserInteraction | None = None,
     stdin: TextIO | None = None,
     stdout: TextIO | None = None,
+    event_observer: Callable[[RuntimeEvent], None] | None = None,
     session_id: str | None = None,
     restored_continuity: tuple[CompletedRunContinuity, ...] = (),
 ) -> AgentRuntime:
@@ -225,8 +226,14 @@ def build_runtime(
         stdout or sys.stdout,
         debug=config.debug,
     )
+    if stdout is not None and event_observer is not None:
+        raise ValueError("stdout and event_observer are mutually exclusive")
     observer = (
-        _event_writer(stdout, debug=config.debug) if stdout is not None else None
+        event_observer
+        if event_observer is not None
+        else _event_writer(stdout, debug=config.debug)
+        if stdout is not None
+        else None
     )
     context_manager = ContextManager(
         max_context_chars=config.max_context_chars,
@@ -301,6 +308,64 @@ def _event_writer(
             raise UserInteractionError("terminal activity output failed") from error
 
     return report
+
+
+_JSONL_EXCLUDED_EVENT_FACTS = frozenset(
+    {
+        "action",
+        "diagnostic",
+        "pre_existing_paths",
+        "known_touched_paths",
+        "new_or_other_paths",
+    }
+)
+
+
+class _JsonlEventStream:
+    """Synchronous bounded JSONL projection of normalized Runtime events."""
+
+    __slots__ = ("_secret_values", "_sequence", "_stdout")
+
+    def __init__(self, stdout: TextIO, secret_values: tuple[str, ...]) -> None:
+        self._stdout = stdout
+        self._secret_values = secret_values
+        self._sequence = 0
+
+    def __call__(self, event: RuntimeEvent) -> None:
+        safe_facts = {
+            key: (
+                _redact_values(value, self._secret_values)
+                if isinstance(value, str)
+                else value
+            )
+            for key, value in event.facts.items()
+            if key not in _JSONL_EXCLUDED_EVENT_FACTS
+        }
+        self._write(
+            {
+                "schema_version": 1,
+                "type": "event",
+                "sequence": self._next_sequence(),
+                "event": {"kind": event.kind, "facts": safe_facts},
+            }
+        )
+
+    def write_result(self, document: Mapping[str, object]) -> None:
+        self._write(
+            {
+                "schema_version": 1,
+                "type": "result",
+                "sequence": self._next_sequence(),
+                "result": dict(document),
+            }
+        )
+
+    def _next_sequence(self) -> int:
+        self._sequence += 1
+        return self._sequence
+
+    def _write(self, document: Mapping[str, object]) -> None:
+        _write_json_document(document, self._stdout)
 
 
 def _render_event(
@@ -654,10 +719,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-duration", type=int)
     parser.add_argument("--max-context-chars", type=int)
     parser.add_argument("--debug", action="store_true", default=None)
-    parser.add_argument(
+    machine_output = parser.add_mutually_exclusive_group()
+    machine_output.add_argument(
         "--json",
         action="store_true",
         help="emit one machine-readable document for a one-shot task",
+    )
+    machine_output.add_argument(
+        "--jsonl",
+        action="store_true",
+        help="stream safe normalized events and one terminal result",
     )
     parser.add_argument(
         "--non-interactive",
@@ -706,15 +777,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         for name in _DEFAULT_SECRET_ENVIRONMENT_NAMES
         if (value := os.environ.get(name))
     )
+    jsonl_stream = (
+        _JsonlEventStream(sys.stdout, startup_secret_values)
+        if args.jsonl
+        else None
+    )
     session_management = args.list_sessions or args.delete_session is not None
     if session_management:
-        if args.task or args.non_interactive or args.review:
+        if args.task or args.non_interactive or args.review or args.jsonl:
             code = "SESSION_MANAGEMENT_ARGUMENT_CONFLICT"
             message = (
                 "session management does not accept a task, --non-interactive, "
-                "or --review"
+                "--review, or --jsonl"
             )
-            if args.json:
+            if args.jsonl:
+                assert jsonl_stream is not None
+                jsonl_stream.write_result(_startup_failure_document(code, message))
+            elif args.json:
                 _write_json_document(
                     _startup_failure_document(code, message),
                     sys.stdout,
@@ -729,7 +808,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             json_output=args.json,
             secret_values=startup_secret_values,
         )
-    if (args.json or args.non_interactive) and not args.task:
+    if args.jsonl and not args.non_interactive:
+        code = "JSONL_NON_INTERACTIVE_REQUIRED"
+        message = "--jsonl requires --non-interactive"
+        assert jsonl_stream is not None
+        jsonl_stream.write_result(_startup_failure_document(code, message))
+        return 2
+    if (args.json or args.jsonl or args.non_interactive) and not args.task:
         code = (
             "NON_INTERACTIVE_ONE_SHOT_REQUIRED"
             if args.non_interactive
@@ -740,7 +825,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.non_interactive
             else "--json requires a one-shot task"
         )
-        if args.json:
+        if args.jsonl:
+            assert jsonl_stream is not None
+            jsonl_stream.write_result(_startup_failure_document(code, message))
+        elif args.json:
             _write_json_document(
                 _startup_failure_document(code, message),
                 sys.stdout,
@@ -778,12 +866,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.non_interactive
                 else None
             ),
-            stdout=sys.stderr if args.json else sys.stdout,
+            stdout=(
+                None
+                if args.jsonl
+                else sys.stderr
+                if args.json
+                else sys.stdout
+            ),
+            event_observer=jsonl_stream,
             session_id=resumed_session_id,
             restored_continuity=restored_continuity,
         )
     except (OSError, ValueError, SessionStoreError) as error:
         code = error.code if isinstance(error, SessionStoreError) else "STARTUP_FAILURE"
+        if args.jsonl:
+            assert jsonl_stream is not None
+            message = _redact_values(str(error), startup_secret_values)
+            jsonl_stream.write_result(_startup_failure_document(code, message))
+            return 2
         if args.json:
             message = _redact_values(str(error), startup_secret_values)
             _write_json_document(
@@ -794,7 +894,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"启动失败：{error}", file=sys.stderr)
         return 2
 
-    if args.json:
+    if args.json or args.jsonl:
         run = runtime.run(" ".join(args.task))
         checkpoint_updated, session_error = _checkpoint_session(
             runtime,
@@ -803,21 +903,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             config,
             secret_values=(config.api_key, *startup_secret_values),
         )
-        _write_json_document(
-            _run_json_document(
-                run,
-                secret_values=(config.api_key, *startup_secret_values),
-                include_review=args.review,
-                session_id=(
-                    runtime.session.session_id
-                    if session_store is not None
-                    else None
-                ),
-                session_checkpoint_updated=checkpoint_updated,
-                session_error=session_error,
+        document = _run_json_document(
+            run,
+            secret_values=(config.api_key, *startup_secret_values),
+            include_review=args.review,
+            session_id=(
+                runtime.session.session_id if session_store is not None else None
             ),
-            sys.stdout,
+            session_checkpoint_updated=checkpoint_updated,
+            session_error=session_error,
         )
+        if args.jsonl:
+            assert jsonl_stream is not None
+            jsonl_stream.write_result(document)
+        else:
+            _write_json_document(document, sys.stdout)
         return 1 if session_error is not None else _run_exit_code(run)
 
     print(STARTUP_MESSAGE)

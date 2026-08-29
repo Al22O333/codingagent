@@ -1556,6 +1556,28 @@ verification_sufficiency = NOT_INFERRED
 
 Path每组最多投影50项；Runtime最多保留32条实际 Shell execution，command/cwd各500字符；已进入 execution后被取消的命令显示为 `INTERRUPTED`。所有文本在输出前再次做 Runtime Secret redaction，human terminal使用安全 quoting。Review不包含 stdout/stderr、edit content、未执行的 permission action、PendingAction或 provider payload。`presentation_category`只复用现有高置信 UI label，不是 verification判定；exit 0也不自动证明验证充分性。
 
+### 42.5 Bounded Non-Interactive JSONL Events
+
+CLI支持：
+
+```text
+coding-agent --workspace <PATH> --jsonl --non-interactive <one-shot task...>
+```
+
+`--jsonl` 与 `--json`互斥，必须同时使用`--non-interactive`与positional one-shot task；它不适用于interactive Session或model-free session management。它可以与`--review`、`--persist-session`或`--resume`组合。
+
+stdout只包含newline-delimited schema version 1 JSON documents。每行拥有从1开始严格递增的`sequence`。零个或多个event lines形如：
+
+```json
+{"schema_version":1,"type":"event","sequence":1,"event":{"kind":"run_started","facts":{}}}
+```
+
+最后恰有一个`type=result` line，其`result`复用§42.1 terminal JSON document（包括显式请求的review/session optional fields）。Startup/usage failure没有event line，只返回sequence 1的terminal result。Process exit code继续使用现有lifecycle语义。
+
+Event只投影Runtime已经bounded、Secret-redacted的normalized scalar facts，并在CLI再次redact。JSONL明确剔除`action`、`diagnostic`、`pre_existing_paths`、`known_touched_paths`与`new_or_other_paths`；因此不包含Shell stdout/stderr、content-bearing Tool arguments、exact path lists、provider payload或reasoning continuation。需要exact terminal path/command facts时由用户显式组合`--review`，只在result中返回。
+
+JSONL是Runtime event stream，不是provider token streaming、partial Assistant/ToolCall protocol、Tool output streaming、persistent log或control channel。Event consumer不能approve permission、回答clarification或改变Runtime；required interaction仍只在terminal result中以exit 3表示。
+
 ---
 
 ## Interactive CLI and Session Control
