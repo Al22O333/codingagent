@@ -43,6 +43,7 @@ from .protocol import (
     ModelRequest,
     ModelResponse,
     ToolCall,
+    ToolCapability,
     ToolError,
     ToolKind,
     ToolOutcome,
@@ -186,6 +187,9 @@ class AgentRun:
     pending_user_request: ConfirmationRequest | ClarificationRequest | None = None
     pending_action: PendingAction | None = None
     paused_duration_seconds: float = 0.0
+    completion_audit_required: bool = False
+    completion_audit_active: bool = False
+    pending_final_candidate: str | None = None
 
 
 @dataclass(slots=True)
@@ -296,6 +300,7 @@ class AgentRuntime:
                 self._context_manager.end_run(
                     completed=agent_run.state is RunState.COMPLETED
                 )
+                self._clear_completion_audit_state(agent_run)
                 self._emit(
                     "run_terminal",
                     run_id=agent_run.run_id,
@@ -327,6 +332,7 @@ class AgentRuntime:
 
             was_incomplete = self._context_manager.history_incomplete
             messages = self._context_manager.build_model_messages(
+                completion_audit_active=agent_run.completion_audit_active,
                 corrective_instruction=(
                     corrective_feedback.text
                     if corrective_feedback is not None
@@ -383,9 +389,16 @@ class AgentRuntime:
             corrective_feedback = None
 
             if response.tool_calls:
+                if agent_run.completion_audit_active:
+                    self._emit(
+                        "completion_audit_continued",
+                        model_turn=agent_run.model_turns,
+                        tool_call_count=len(response.tool_calls),
+                    )
                 assistant_message = AssistantMessage(
                     text=response.text,
                     tool_calls=response.tool_calls,
+                    provider_reasoning_content=response.provider_reasoning_content,
                 )
                 self._context_manager.record_assistant_message(assistant_message)
                 tool_results = self._execute_tool_batch(
@@ -400,10 +413,34 @@ class AgentRuntime:
                     return agent_run
                 continue
 
-            assistant_message = AssistantMessage(text=response.text)
+            assistant_message = AssistantMessage(
+                text=response.text,
+                provider_reasoning_content=response.provider_reasoning_content,
+            )
+            if (
+                agent_run.completion_audit_required
+                and not agent_run.completion_audit_active
+            ):
+                agent_run.pending_final_candidate = response.text
+                agent_run.completion_audit_active = True
+                self._context_manager.record_candidate_message(assistant_message)
+                self._emit(
+                    "completion_audit_started",
+                    model_turn=agent_run.model_turns,
+                )
+                continue
+
             self._context_manager.record_assistant_message(assistant_message)
             agent_run.final_response = response.text
             agent_run.state = RunState.COMPLETED
+            if agent_run.completion_audit_active:
+                self._emit(
+                    "completion_audit_finished",
+                    model_turn=agent_run.model_turns,
+                )
+                agent_run.pending_final_candidate = None
+                agent_run.completion_audit_active = False
+                self._context_manager.clear_pending_candidate()
             self._refresh_active_duration(agent_run, run_started_at)
             return agent_run
 
@@ -428,6 +465,12 @@ class AgentRuntime:
         agent_run.wait_reason = None
         agent_run.pending_user_request = None
         agent_run.pending_action = None
+
+    @staticmethod
+    def _clear_completion_audit_state(agent_run: AgentRun) -> None:
+        agent_run.completion_audit_required = False
+        agent_run.completion_audit_active = False
+        agent_run.pending_final_candidate = None
 
     def _execute_tool_batch(
         self,
@@ -652,6 +695,11 @@ class AgentRuntime:
                     message=f"unknown tool: {tool_call.name}",
                 ),
             ))
+
+        if tool.spec.capabilities.intersection(
+            {ToolCapability.FILE_MUTATION, ToolCapability.COMMAND_EXECUTION}
+        ):
+            agent_run.completion_audit_required = True
 
         try:
             arguments = tool.validate(tool_call.raw_arguments)

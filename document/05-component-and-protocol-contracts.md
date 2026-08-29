@@ -510,9 +510,12 @@ SystemMessage(text)
 
 UserMessage(text)
 
+RuntimeInstructionMessage(text)
+
 AssistantMessage(
     text,
     tool_calls,
+    provider_reasoning_content,
 )
 
 ToolResultMessage(
@@ -530,6 +533,10 @@ Tool Call(s)
 
 其中 text 在存在 Tool Call 时仅属于当前 action commentary，不是 Final Response。
 
+`provider_reasoning_content` 是一个可选、internal-only 的 provider continuation field。它只用于满足 concrete ModelClient 在同一 Agent Run 内继续对话时的协议回放要求；它不是普通 assistant text，不得展示给用户、写入日志、进入 Tool argument / ToolResult，或进入 completed-run continuity。v1 只定义这一条窄字段，不建立通用 raw provider metadata 容器。
+
+`RuntimeInstructionMessage` 是 Runtime 合成的 request-local control message，不代表用户输入，不写入 Conversation History，不进入 trusted task-constraint update path。OpenAI-compatible ModelClient 可将它映射为带有明确 `not user-authored` 标记的 wire `user` role，以便在 Assistant Candidate 后形成 provider 能可靠响应的新一轮；内部类型区分必须始终保留，不能把它重新构造成 `UserMessage`。
+
 ---
 
 ### 5.3 ModelResponse
@@ -541,6 +548,7 @@ ModelResponse(
     text: str | None,
     tool_calls: list[ToolCall],
     usage: ModelUsage | None,
+    provider_reasoning_content: str | None,
 )
 ```
 
@@ -559,6 +567,10 @@ tool_calls != []
 `tool_calls == []` 但 `text` 为 `None`、空字符串或仅包含空白时，不得直接令 Run 进入 `COMPLETED`；它产生 response-level `ModelProtocolError`，并进入已有的 bounded corrective re-prompt。v1 不定义非文本 Final Response。
 
 `ModelResponse` 只表示已经能够被 concrete ModelClient 可靠规范化的模型响应。
+
+当 provider 返回同一 Run 后续请求必须原样回放的 reasoning continuation（例如 DeepSeek thinking-mode Tool workflow）时，concrete ModelClient 必须将其规范化到 `provider_reasoning_content`，Runtime 在记录对应 `AssistantMessage` 时保留该值，后续请求再由同一 concrete ModelClient 原样序列化。该字段是 opaque protocol continuation：Runtime、ContextManager 与 Prompt policy 不解释其内容，也不得把它当成用户可见推理或 semantic policy 输入。Context size accounting 必须计入其长度。
+
+真正 Final 可以携带该字段以完成当前 response 的规范化，但 completed-run continuity 必须丢弃它；新 Run 不回放上一 Run 的 provider reasoning continuation。
 
 整个响应无法可靠规范化时，不产生一个：
 

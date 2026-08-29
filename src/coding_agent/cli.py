@@ -332,6 +332,8 @@ def _render_event(
                 lines.append(f"  ✗ {_human_error(str(code))}")
     elif event.kind == "context_truncated":
         lines.append("! 已裁剪较早的工作上下文")
+    elif event.kind == "completion_audit_started":
+        lines.extend(("", "◆ 检查完成情况", ""))
     elif event.kind == "budget_exhausted":
         lines.append("! 运行达到资源限制")
     elif event.kind == "permission_resolved":

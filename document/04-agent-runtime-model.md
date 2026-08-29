@@ -108,6 +108,8 @@ Now add tests for it.
 * `pending_user_request`
 * `ModelProtocolError` counter
 * temporary failure/repetition tracking
+* completion self-audit eligibility / active flags
+* pending Candidate Final [when applicable]
 * termination reason
 
 新 Run 不继承上一 Run 的执行计数、pending action 或 transient error state。
@@ -207,7 +209,7 @@ Current Task + Context
         ↓
  ┌──────────────────────────────┐
  │                              │
-Final Response              Tool Call(s)
+Candidate Final             Tool Call(s)
  │                              │
  │                 Registry Lookup + Validation
  │                              │
@@ -830,7 +832,7 @@ refactor the entire module
 
 ## 10. Run Boundary
 
-当前 Agent Run 在产生 Final Response 后结束。
+当前 Agent Run 在产生符合 §11 的 user-facing Final Response 后结束。Eligible Run 的首次合法无 Tool 文本只是 Candidate Final；它必须先完成一次 bounded completion self-audit，不能提前结束 Run。
 
 之后用户继续输入时：
 
@@ -864,7 +866,52 @@ AND text is not None
 AND text.strip() != ""
 ```
 
-时才有资格成为当前 Agent Run 的 user-facing Final Response，并使 Run 进入 `COMPLETED`。Normalized Model Response 的具体 contract 由 05 定义。
+时才形成一个 syntactically valid Candidate Final。Normalized Model Response 的具体 contract 由 05 定义；Candidate 是否能够立即成为 user-facing Final，由本节的 Runtime control semantics 决定。
+
+### 11.1 Deterministic Eligible Run
+
+Runtime 不通过自然语言判断 Run 是否“属于 mutating task”。当一个已知 Tool Call 进入 Runtime processing pipeline 并具有以下任一 capability 时：
+
+```text
+FILE_MUTATION
+OR
+COMMAND_EXECUTION
+```
+
+当前 Run 变为 completion-self-audit eligible。这里的进入 processing pipeline 与 Tool Call Attempt accounting 使用同一边界：Registry 已识别该 Tool，Runtime 已开始处理且该 call 消耗一次 attempt。无论后续结果是 success、operation / command failure、constraint / permission rejection 或用户拒绝，eligibility 都不撤销；batch fail-stop 后未进入 pipeline 的 remainder 不产生 eligibility。
+
+`EXECUTE_COMMAND` 被故意纳入这一保守 deterministic rule，因为 Shell 既可能只读也可能产生副作用，而 v1 不建立不完整的任意 Shell mutation classifier。本文统一称此类 Run 为 `eligible Run` 或 `action-bearing Run`，不声称它必然发生过 mutation。
+
+### 11.2 Bounded Completion Self-Audit
+
+如果 Run 不 eligible，合法 Candidate 可以直接成为 user-facing Final 并进入 `COMPLETED`。
+
+如果 Run eligible 且尚未开始 self-audit，首次合法 Candidate 必须：
+
+```text
+save as pending Candidate Final
+→ record as a hidden AssistantMessage in current-Run Context
+→ do not set agent_run.final_response
+→ do not expose to the user
+→ set completion_audit_active = true
+→ issue the next bounded Model Turn
+```
+
+Self-audit 使用同一模型、同一 Run、同一 Context policy、同一 Tool set 与同一 safety / permission boundary。它不是 independent reviewer、第二 Agent 或新的 top-level lifecycle state。Pending Candidate 以其真实 assistant role 进入当前 Run 的 Model Context，使 Audit 能直接复核上一答案；它仍对用户隐藏且不得进入 completed-run continuity。Audit 根据原始任务、Candidate、当前 retained Tool history、workspace evidence 与 transient CompletionAuditInstruction 重新检查完成情况并生成新的响应。一旦进入 self-audit，后续零个或多个普通 Tool Turns 都属于该次 audit 的延续，直到模型产生下一个合法 Candidate；该 Candidate 才成为真正的 user-facing Final，并使 Run 进入 `COMPLETED`。
+
+如果 concrete provider 要求在同一 Run 内回放 reasoning continuation，05 定义的 internal-only field 必须随对应 AssistantMessage 保留和回传。Audit 的新对话轮次由 07 定义的 request-local `RuntimeInstructionMessage` 触发；provider continuation 不成为 user-facing reasoning，不允许日志或 observer 暴露，也不得跨 Run 保留。
+
+每个 Run 最多进入一次 self-audit。Self-audit 后的合法 Final 不递归触发第二次 audit。Run 完成、失败或取消时必须清理 pending Candidate 和 audit control flags。
+
+建议的最小 Run-local control state：
+
+```text
+completion_audit_required: bool
+completion_audit_active: bool
+pending_final_candidate: str | None
+```
+
+等价的小型表示允许，但不得新增 `REVIEWING` / `VERIFIED` lifecycle state、独立 Review protocol 或 persistent audit state。Candidate 的隐藏 Context 表示与 transient guidance 由 07 定义，provider continuation contract 由 05 定义，verification 与 completion-claim 语义由 08 定义。
 
 `text=None`、空字符串或仅包含 whitespace 且没有 Tool Calls 时，属于 response-level `ModelProtocolError`：
 
@@ -923,6 +970,8 @@ model_turns += 1
 ```
 
 即使该 response 包含多个 Tool Calls，也只增加一次 Model Turn。
+
+Candidate Final 与其后的 self-audit response 分别是新的 assistant response，因此分别消耗一个 Model Turn。Audit 中不存在免费或无限额外 Model Turn。如果 eligible Run 已取得 Candidate，但剩余 budget 不足以发起必需的 self-audit，Runtime 不得静默接受未经 audit 的 Candidate，而应沿用 hard budget exhaustion 终止语义。具体默认 turn limit 仍由 09 owning；没有 implementation evidence 前不预先调整默认值。
 
 ---
 
@@ -1425,7 +1474,7 @@ Agent Run 可以因为以下来源结束。
 
 ### 21.1 Normal Final
 
-模型返回：
+模型返回符合 §11 的真正 user-facing Final：
 
 ```text
 no Tool Calls
@@ -1433,7 +1482,7 @@ no Tool Calls
 final textual response
 ```
 
-Runtime：
+对于 non-eligible Run，该响应可以是首次 Candidate；对于 eligible Run，它必须是 self-audit active 后的合法 Final。Runtime：
 
 ```text
 → COMPLETED
@@ -1519,14 +1568,14 @@ Agent 不需要为了正常结束而声称任务成功。
 * 缺失必要项目文件
 * 当前权限不允许必要操作
 
-模型可以给出 Final Response：
+模型可以给出诚实的 Candidate / Final Response：
 
 ```text
 I could not complete X because Y.
 To continue, Z is required.
 ```
 
-Runtime 可以正常进入 `COMPLETED`，因为：
+如果 Run eligible，该 inability response 仍先经过一次 bounded self-audit；self-audit 后的诚实 Final 可以正常进入 `COMPLETED`，因为：
 
 > Agent Loop 正常结束了。
 
@@ -1580,8 +1629,25 @@ while state == RUNNING:
     if tool_calls.length == 0
        AND text is not None
        AND text.strip() != "":
-        emit final response
-        → COMPLETED
+        if completion_audit_active:
+            record AssistantMessage(final text)
+            set agent_run.final_response
+            clear pending Candidate / audit control state
+            emit user-facing final response
+            → COMPLETED
+
+        else if completion_audit_required:
+            record hidden Candidate AssistantMessage
+            save pending Candidate Final reference/state
+            set completion_audit_active = true
+            do not emit Candidate to user
+            → next bounded Model Turn with CompletionAuditInstruction
+
+        else:
+            record AssistantMessage(final text)
+            set agent_run.final_response
+            emit user-facing final response
+            → COMPLETED
 
     else if tool_calls.length == 0:
         → ModelProtocolError
@@ -1600,6 +1666,8 @@ while state == RUNNING:
             tool_call_attempts += 1
 
             ToolRegistry lookup
+            if known Tool capability contains FILE_MUTATION or EXECUTE_COMMAND:
+                completion_audit_required = true
             validate tool arguments
                 └─ invalid
                      → validation result
@@ -1723,6 +1791,11 @@ v1 应保持以下运行时不变量：
 28. Clarification 必须通过 structured interaction call 发起；它消耗一次 Tool Call Attempt，进入 `WAITING_FOR_USER(CLARIFICATION)`，并在用户回答成为 observation 后于同一 Agent Run 中开启新的 Model Turn。
 29. Terminal interruption 进入 `CANCELLED` 或 `FAILED`，不得产生下一 Model Turn。
 30. Expected local action preparation failure 使用 `OPERATION_FAILURE`，不新增独立 ToolOutcome。
+31. 已知 `FILE_MUTATION` 或 `COMMAND_EXECUTION` Tool Call 进入 processing pipeline 后，当前 Run 必须保持 completion-self-audit eligible；未进入 pipeline 的 batch remainder 不产生 eligibility。
+32. Eligible Run 的首次合法无 Tool文本只是 hidden Candidate Final；它以真实 AssistantMessage 进入 current-Run Context，但不得设置 `agent_run.final_response`、展示给用户、进入 completed-run continuity 或令 Run 进入 `COMPLETED`。
+33. 每个 eligible Run 最多进入一次 bounded same-model completion self-audit；audit 中的 Tool Turns 继续使用原 Agent Loop、预算、约束、权限与 cancellation semantics。
+34. Self-audit active 后的下一个合法无 Tool 文本可以成为真正 Final；completion self-audit happened 不等于 verification succeeded，`COMPLETED` 仍不等于 task success。
+35. Candidate、internal provider reasoning continuation、audit flags 和 pending audit state 必须在 Run terminal cleanup 中清除，不得进入下一 Run 的 transient state。
 
 ---
 
@@ -1754,6 +1827,7 @@ v1 应保持以下运行时不变量：
 * Tool Result 进入 Context 的策略
 * RepeatedActionWarning 如何提供给模型
 * Task State、scope update 与 Semantic Relevance guidance 如何呈现给模型
+* CompletionAuditInstruction 的 request-local presentation与 hidden Candidate 的 current-Run Context lifecycle
 * Tool dependency / batching 行为的 Prompt 指导
 * 历史 observation 的淘汰和 stale-context 管理
 
@@ -1761,7 +1835,7 @@ v1 应保持以下运行时不变量：
 
 * `COMPLETED` 后任务结果如何分类
 * successful / partial / blocked / unverified 等语义是否需要显式表示
-* 模型产生 Final 前是否需要验证要求
+* Completion self-audit guidance、verification selection 与 Final claim discipline
 * 任务完成声明与 Verification Evidence 的关系
 
 ### `09-cli-observability-and-configuration.md`

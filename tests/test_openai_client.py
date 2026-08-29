@@ -23,6 +23,8 @@ from coding_agent.openai_client import (
 from coding_agent.protocol import (
     AssistantMessage,
     ModelRequest,
+    ModelResponse,
+    RuntimeInstructionMessage,
     SystemMessage,
     ToolCall,
     ToolError,
@@ -62,11 +64,16 @@ def _response(
     text: str | None,
     tool_calls: list[object] | None = None,
     finish_reason: str = "stop",
+    reasoning_content: str | None = None,
 ) -> object:
     return SimpleNamespace(
         choices=[
             SimpleNamespace(
-                message=SimpleNamespace(content=text, tool_calls=tool_calls or []),
+                message=SimpleNamespace(
+                    content=text,
+                    tool_calls=tool_calls or [],
+                    reasoning_content=reasoning_content,
+                ),
                 finish_reason=finish_reason,
             )
         ],
@@ -124,6 +131,81 @@ def test_no_tool_final_smoke_and_request_serialization() -> None:
             "stream": False,
         }
     ]
+
+
+def test_assistant_last_continuation_serializes_without_role_rewriting() -> None:
+    client, sdk = _client(
+        _response(text="audit-ready", reasoning_content="opaque-next-reasoning")
+    )
+
+    response = client.complete(
+        ModelRequest(
+            messages=(
+                SystemMessage(
+                    "The last assistant message is a candidate response. "
+                    "Continue with a completion review."
+                ),
+                UserMessage("Complete the task."),
+                AssistantMessage(
+                    text="Candidate response.",
+                    provider_reasoning_content="opaque-prior-reasoning",
+                ),
+            )
+        )
+    )
+
+    assert response.text == "audit-ready"
+    assert sdk.completions.calls[0]["messages"] == [
+        {
+            "role": "system",
+            "content": (
+                "The last assistant message is a candidate response. "
+                "Continue with a completion review."
+            ),
+        },
+        {"role": "user", "content": "Complete the task."},
+        {
+            "role": "assistant",
+            "content": "Candidate response.",
+            "reasoning_content": "opaque-prior-reasoning",
+        },
+    ]
+    assert response.provider_reasoning_content == "opaque-next-reasoning"
+
+
+def test_runtime_instruction_has_distinct_internal_type_and_user_wire_role() -> None:
+    client, sdk = _client(_response(text="audited"))
+
+    client.complete(
+        ModelRequest(
+            messages=(
+                UserMessage("Do it"),
+                AssistantMessage("Candidate"),
+                RuntimeInstructionMessage("[Runtime instruction] Audit now"),
+            )
+        )
+    )
+
+    assert sdk.completions.calls[0]["messages"][-1] == {
+        "role": "user",
+        "content": "[Runtime instruction] Audit now",
+    }
+
+
+def test_reasoning_continuation_is_hidden_from_value_object_repr() -> None:
+    secret_like_reasoning = "private-provider-reasoning"
+
+    assistant = AssistantMessage(
+        text="Candidate",
+        provider_reasoning_content=secret_like_reasoning,
+    )
+    response = ModelResponse(
+        text="Candidate",
+        provider_reasoning_content=secret_like_reasoning,
+    )
+
+    assert secret_like_reasoning not in repr(assistant)
+    assert secret_like_reasoning not in repr(response)
 
 
 def test_read_file_tool_call_smoke_preserves_identity_and_raw_arguments() -> None:

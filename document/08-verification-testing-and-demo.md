@@ -36,7 +36,7 @@
 
 核心原则：
 
-> Verification is model-directed coding behavior, not a mandatory Runtime phase.
+> Verification mechanism selection remains model-directed. Eligible runs receive one mandatory bounded completion self-audit, but successful verification is not a Runtime completion prerequisite.
 
 以及：
 
@@ -44,7 +44,7 @@
 
 ---
 
-## 2. Verification Is Not a Fixed Runtime Phase
+## 2. Verification Is Not a Fixed Test-Gated Runtime Phase
 
 v1 不建立强制：
 
@@ -85,9 +85,11 @@ Runtime只负责：
 * 返回真实 ToolResult；
 * enforce budgets / termination。
 
+04 另外要求 deterministic eligible Run 在首次 Candidate Final 后进入一次 same-model Bounded Completion Self-Audit。Mandatory 的是获得一次明确的完成性自检机会，而不是执行某种固定 verification mechanism、取得测试成功或建立 `VERIFIED` 状态。Audit 中是否需要读取文件、补回归测试、运行命令、继续修改或诚实结束，仍由模型根据当前任务与 observation 决定。
+
 ### 2.1 `COMPLETED` Is a Lifecycle Result
 
-> `COMPLETED` means that AgentRuntime accepted a legal non-empty Final Response and ended the Run normally.
+> `COMPLETED` means that AgentRuntime accepted a legal non-empty Final Response after any applicable bounded self-audit and ended the Run normally.
 
 `COMPLETED` 是 Runtime lifecycle result，不是 task outcome quality 或 verification grade。它不等于：
 
@@ -108,6 +110,20 @@ Runtime lifecycle state
 !=
 task outcome quality / verification grade
 ```
+
+### 2.2 Bounded Completion Self-Audit
+
+Eligible Run、hidden Candidate Final、Audit control mode 与触发规则由 04 owning；Audit Instruction 和 Candidate current-Run retention / continuity exclusion 由 07 owning。08 owning其 verification / claim discipline：
+
+1. 它是 same-model、same-Run self-audit，不是 independent reviewer 或 LLM Judge。
+2. 模型重新比较原始任务、明确限制、workspace 改动与 observed evidence。
+3. 在相关时检查遗漏的 boundary、failure、compatibility 和 regression behavior。
+4. visible tests passing 本身不足以证明全部要求已覆盖。
+5. 发现实质缺口时继续使用正常 Tool Loop；没有缺口时返回诚实 Final。
+6. Audit 不扩大 permission、不绕过 explicit constraints，也不获得额外 verification privilege。
+7. 每个 eligible Run 最多进入一次；Audit 中可以包含零个或多个普通 Tool Turns。
+
+Audit 发生不等于 verification 成功，也不构成 semantic correctness guarantee。Runtime 仍不判断某项测试是否充分、项目约束是否完整提取或代码是否正确。
 
 ---
 
@@ -147,7 +163,7 @@ task outcome quality / verification grade
 * non-mutating diagnostics；
 * tests/build commands用于理解问题。
 
-但不存在强制 verification phase。
+但不存在强制 test/build verification phase；如果该 Run 因 `COMMAND_EXECUTION` 成为 eligible，仍按 04 接受一次 bounded completion self-audit。
 
 ### 4.2 Code Mutation
 
@@ -297,14 +313,14 @@ verification failure
 
 ## 8. Final Is Allowed Without Successful Verification
 
-Runtime 不因为：
+完成 04 要求的 bounded self-audit 后，Runtime 不因为：
 
 ```text
 tests still failing
 verification unavailable
 ```
 
-而禁止 syntactically valid Final。
+而禁止 syntactically valid、audit-eligible Final。
 
 Agent可以诚实结束：
 
@@ -323,7 +339,7 @@ Implemented X, but Y could not be verified because Z.
 
 因此：
 
-> Verification status constrains what completion claims are honest; it does not create a mandatory Final gate.
+> Verification status constrains what completion claims are honest; successful verification does not create a mandatory Final gate. The bounded self-audit opportunity itself is mandatory for eligible Runs.
 
 ---
 
@@ -875,6 +891,20 @@ User
 
 * nonblank final；
 * blank/no-tool response → protocol error。
+
+#### Bounded Completion Self-Audit
+
+至少覆盖：
+
+```text
+eligible Tool attempt
+→ Candidate Final hidden
+→ Audit Model Turn
+├─ Final → COMPLETED
+└─ Tool Call(s) → normal Tool Loop → Final → COMPLETED
+```
+
+并验证 eligibility、hidden Candidate AssistantMessage、一次性 audit、budget accounting、permission / clarification / cancellation reuse，以及 Candidate 进入 current-Run audit Context 但不进入 user-facing Final 或 completed-run continuity；provider integration tests 还应验证所需的 internal reasoning continuation 能原样回放且不会出现在普通输出中。
 
 #### Single Tool Vertical Slice
 
@@ -1769,15 +1799,15 @@ Traceability 使用简单 Markdown checklist / mapping 即可，不建立 requir
 
 ### 54. Verification and Testing Invariants
 
-1. Verification不是 Runtime mandatory phase。
-2. 模型决定 verification是否需要以及使用什么 mechanism。
+1. Verification不是固定 test-gated Runtime phase；eligible Run 必须获得一次 bounded completion self-audit opportunity。
+2. 模型决定具体 verification mechanism、scope 以及是否能够成功完成 verification。
 3. Runtime不维护通用 `verification_success` state。
 4. Code mutation在 practical 时应进行 relevant verification。
 5. 优先使用 repository-supported verification。
 6. 默认优先 smallest meaningful targeted verification。
 7. change scope / risk较大时可以扩大 verification。
 8. verification failure是 observation，不自动导致 Run FAILED。
-9. valid Final不要求所有 verification成功。
+9. 完成 applicable self-audit 后的 valid Final不要求所有 verification成功。
 10. incomplete verification必须诚实报告。
 11. verification action不获得 permission exemption。
 12. Completion claim不得强于 observed evidence。
@@ -1799,13 +1829,16 @@ Traceability 使用简单 Markdown checklist / mapping 即可，不建立 requir
 28. Demo必须走真实 Agent execution path。
 29. Demo acceptance是 outcome/evidence-oriented，不要求固定 Tool sequence。
 30. 具体 Demo task留到 M4选择。
-31. `COMPLETED`只表示Runtime接受合法非空Final并正常结束Run，不表示task fully succeeded或fully verified。
+31. `COMPLETED`只表示Runtime在完成 applicable bounded self-audit 后接受合法非空Final并正常结束Run，不表示task fully succeeded或fully verified。
 32. v1不新增VERIFIED、PARTIAL、BLOCKED等Runtime lifecycle state；task outcome quality通过诚实Final表达。
 33. Startup关键invariant不满足时必须fail closed，并有deterministic evidence。
 34. Small Python projects是v1主要systematic E2E / acceptance环境，但architecture保持language-neutral。
 35. 03拥有的每项v1 normative safety invariant必须具有traceable verification evidence。
 36. 每项v1 normative requirement必须可追踪到implementation location与evidence；不得以虚假Deferred掩盖未实现的v1 contract。
 37. A terminal interruption while Tool execution is pending must not leave Context or protocol state that prevents a subsequent Run in the same Session from starting normally.
+38. Completion self-audit 使用同一模型、同一 Run 与正常 Tool Loop，不建立 independent reviewer、LLM Judge 或新 Runtime lifecycle state。
+39. Eligible Run 的 Candidate Final 必须对用户隐藏；Audit happened 不等于 verified，`COMPLETED` 仍不等于 task success。
+40. Completion self-audit 的 deterministic orchestration 主要通过 FakeModelClient 测试，real-model M4 evidence 用于评估 premature-completion failure 是否降低。
 
 ---
 
@@ -1892,7 +1925,7 @@ Demo选择应基于届时真实 Agent能力和稳定性，而不是反向限制�
 
 Decision：
 
-Verification selection and sufficiency are model-dependent coding judgments，而不是 mandatory Runtime phase。
+Verification mechanism selection and semantic sufficiency仍是 model-dependent coding judgments；eligible Run 必须经历一次 bounded completion self-audit opportunity，但不要求固定测试、successful verification或`VERIFIED` state。
 
 Canonical owner：
 

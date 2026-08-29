@@ -243,6 +243,7 @@ def test_composition_filters_runtime_secrets_but_preserves_ordinary_environment(
         [
             ModelResponse(text=None, tool_calls=(call,)),
             ModelResponse(text="Environment checked."),
+            ModelResponse(text="Environment checked after review."),
         ]
     )
     config = CLIConfig(
@@ -675,6 +676,31 @@ def test_permission_resolution_does_not_render_a_second_confirmation_prompt() ->
     assert "已批准，仅限本次操作" in rendered
     assert "需要确认" not in rendered
     assert "允许执行" not in rendered
+
+
+def test_completion_audit_has_one_normal_indicator_and_bounded_debug_events() -> None:
+    normal = cli._render_event(
+        RuntimeEvent("completion_audit_started", {"model_turn": 3}),
+        debug=False,
+    )
+    continued = cli._render_event(
+        RuntimeEvent(
+            "completion_audit_continued",
+            {"model_turn": 4, "tool_call_count": 2},
+        ),
+        debug=False,
+    )
+    finished = cli._render_event(
+        RuntimeEvent("completion_audit_finished", {"model_turn": 5}),
+        debug=True,
+    )
+
+    assert normal == ("", "◆ 检查完成情况", "")
+    assert continued == ()
+    rendered_debug = "\n".join(finished)
+    assert "completion_audit_finished" in rendered_debug
+    assert "model_turn=5" in rendered_debug
+    assert "Candidate" not in rendered_debug
 
 
 def test_permission_rejection_tool_result_does_not_duplicate_resolution() -> None:

@@ -118,6 +118,10 @@ def test_agent_repairs_code_after_failed_verification_then_observes_pass(
                 "Updated sign handling after the first verification exposed the "
                 "zero case. The full test command now passes."
             ),
+            ModelResponse(
+                "Self-audit confirmed the positive, zero, and negative cases are "
+                "implemented and the full test command passes."
+            ),
         ]
     )
     runtime = build_runtime(

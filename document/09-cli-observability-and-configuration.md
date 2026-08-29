@@ -780,6 +780,7 @@ Normal / Debug CLI renderer
 * permission requested / resolved；
 * provider transport retry；
 * protocol corrective re-prompt；
+* completion self-audit started / continued / finished；
 * Context destructive eviction；
 * `history_incomplete` transition或相关 context fact；
 * budget exhaustion / relevant counter event；
@@ -1030,6 +1031,26 @@ Normal可以只展示：
 Final Assistant Response必须完整呈现。
 
 v1 不依赖或展示 private chain-of-thought。
+
+### 29.1 Completion Self-Audit Presentation
+
+04/07 定义 eligible Run 的 hidden Candidate Final 与 bounded completion self-audit。Normal CLI 不展示 Candidate，也不把它渲染为普通 intermediate commentary。进入 self-audit 时只显示一次轻量提示：
+
+```text
+◆ 检查完成情况
+```
+
+Audit 中后续 Tool actions继续使用现有 Normal renderer；真正 Final只完整展示一次。不得在 Normal 中暴露 `completion_audit_active`、`pending_final_candidate`、内部 phase 名称或完整 Candidate 文本。
+
+Debug 可以显示 bounded events：
+
+```text
+completion_audit_started
+completion_audit_continued
+completion_audit_finished
+```
+
+这些 event 只携带 safe metadata，例如 Model Turn、触发 eligibility 的 capability、是否继续 Tool Loop和是否产生 Final；不得重复打印完整 Candidate、raw Context 或 Runtime Secret。Observer仍然 read-only、failure-isolated，不参与 audit control flow。
 
 ---
 
@@ -1669,6 +1690,8 @@ CLI展示 failure reason后：
 25. Normal默认不显示provider usage；Debug只显示normalized usage与safe metadata。
 26. Raw provider response、metadata、HTTP body和headers默认不显示且不自动持久化。
 27. Optional observability callback是synchronous、read-only且control-flow independent；callback failure不得成为Agent control-flow failure。
+28. Candidate Final 不进入 Normal output；eligible Run 进入 self-audit 时 Normal 最多显示一次轻量检查提示，真正 Final 只展示一次。
+29. Debug completion-audit events 必须 bounded、Secret-safe，不打印完整 Candidate，并且不能改变 Runtime control flow。
 
 ---
 
@@ -1778,6 +1801,8 @@ LoggingConfig hierarchy
 * Secret-safe observability；
 * normalized provider usage Debug rendering；
 * raw provider metadata suppression；
+* hidden Candidate Final、single Normal audit indicator 与 single true Final rendering；
+* bounded completion-audit Debug events；
 * empty input reprompt；
 * `/exit` / `/quit`；
 * active-Run Ctrl+C cancellation with Session recovery；
@@ -1799,6 +1824,7 @@ LoggingConfig hierarchy
 * Context human notice；
 * terminal/budget presentation；
 * `COMPLETED` 不被渲染为 task success；
+* Candidate Final 不提前显示、Audit Tool events正常显示、真正 Final仅显示一次；
 * `/exit` / EOF / empty input；
 * Ctrl+C Run cancellation；
 * FAILED / CANCELLED 后 same-Session next Run；

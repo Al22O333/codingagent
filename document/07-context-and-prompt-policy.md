@@ -175,7 +175,8 @@ Base Prompt 只负责模型层面的 semantic behavior guidance，至少覆盖�
 9. workspace prompt-injection awareness；
 10. explicit constraints / Runtime permission respect；
 11. multi-tool batching guidance；
-12. Final Response honesty。
+12. Final Response honesty；
+13. 显式 workspace behavior contract 与 accidental legacy behavior 的优先级。
 
 ---
 
@@ -205,6 +206,11 @@ Do not edit based only on guessed file contents. When using exact-text editing,
 choose old_text that reliably identifies the intended current content. If an
 edit fails because the expected content is stale or ambiguous, re-read the
 relevant file before proposing another edit.
+
+Treat explicit behavior constraints in relevant workspace documentation as
+task evidence. Compatibility protects supported behavior; it does not require
+preserving an observed behavior that violates an applicable explicit contract,
+unless the user or documentation expressly requires that behavior.
 
 After making changes, perform relevant practical verification when appropriate.
 Treat tool failures and unsuccessful command outcomes as observations to reason
@@ -458,9 +464,24 @@ A transient request instruction is mandatory for the current `ModelRequest` only
 
 * Context Truncation Notice：当 `history_incomplete == true` 时 mandatory；
 * RepeatedActionWarning：仅当 04 / Runtime 实际产生该 warning 时 mandatory；
+* CompletionAuditInstruction：当 04 的 `completion_audit_active == true` 时 mandatory，并作为 Candidate 后的 request-local `RuntimeInstructionMessage`；
 * Protocol Corrective Instruction：仅在 corrective re-prompt 时 mandatory。
 
 条件不存在时，对应 instruction 不进入该 request；特别是 RepeatedActionWarning 不是每轮必带内容。
+
+### 8.6 Pending Candidate Final Is Hidden Current-Run Context
+
+04 定义的 pending Candidate Final 同时具有 Run-local control state 和一条 hidden current-Run AssistantMessage：
+
+```text
+pending_final_candidate: str | None
+```
+
+Candidate 以其真实 assistant role 写入 current-Run Conversation Context，不伪装为 UserMessage / SystemMessage，也不复制进 CompletionAuditInstruction。它不提前成为 `agent_run.final_response`、不向用户展示，也不进入 completed-run continuity。Audit 模型根据 Initial User Task、Candidate、retained current-Run Tool history、workspace evidence 与 CompletionAuditInstruction 重新检查完成情况。
+
+如果 AssistantMessage 携带 05 定义的 internal-only provider reasoning continuation，ContextManager 必须在当前 Run 内原样保留并计入 size accounting；不得解释、投影、日志化或跨 Run 保留该内容。
+
+Audit active 时，Initial User Task、pending Candidate、current-Run Explicit Task Constraints 的 model-visible presentation 与 CompletionAuditInstruction 属于 mandatory audit context；如果完成全部允许的 eviction 后仍无法 fit，沿用 §9.3 的 unrecoverable context-construction failure，而不是跳过 self-audit。
 
 ---
 
@@ -1453,6 +1474,8 @@ Context Truncation Notice [if history_incomplete]
 +
 optional RepeatedActionWarning
 +
+optional CompletionAuditInstruction
++
 optional Protocol Corrective Instruction
 ```
 
@@ -1465,10 +1488,12 @@ Context Notice             [if history_incomplete]
 
 RepeatedActionWarning      [optional]
 
+CompletionAuditInstruction [if completion audit active]
+
 Corrective Instruction     [optional]
 ```
 
-corrective instruction 位于 system prefix末尾，因为它直接针对当前 request。
+corrective instruction 位于 system prefix末尾，因为它直接针对当前无效 response；如果 self-audit 与 protocol correction 同时 active，CompletionAuditInstruction 仍存在，而 corrective instruction 保持最后。
 
 实现可以通过一个 `SystemMessage` 合并这些文本。
 
@@ -1478,7 +1503,7 @@ corrective instruction 位于 system prefix末尾，因为它直接针对当前 
 
 ## 40. Transient System Messages
 
-Context Notice、RepeatedActionWarning 和 Protocol Corrective Instruction 都属于：
+Context Notice、RepeatedActionWarning、CompletionAuditInstruction 和 Protocol Corrective Instruction 都属于：
 
 > request-local transient guidance.
 
@@ -1512,6 +1537,34 @@ to retry.
 ```
 
 如果 Runtime 没有产生 warning，request 中就没有该 notice。v1 不因此增加新的 repetition subsystem，也不把 warning 变成 hard termination rule。
+
+### 40.2 CompletionAuditInstruction Presentation
+
+04 owns eligible Run、Candidate Final 与 self-audit control flow；07 只负责其 model-visible presentation。CompletionAuditInstruction 是 deterministic、request-local、transient guidance，在 `completion_audit_active == true` 的每个 Audit ModelRequest 中重新生成，直到该 Run 产生真正 Final 或 terminal cleanup。它必须位于 retained current-Run history（包括 pending Candidate）之后，表示为 05 定义的 Runtime-owned `RuntimeInstructionMessage`。该内部类型不是 `UserMessage`、不进入用户消息历史或 trusted constraint path；concrete ModelClient 可按 05 映射 provider wire role。
+
+推荐核心语义：
+
+```text
+Your previous assistant response is a candidate answer that has not been shown
+to the user. Perform one bounded completion self-audit before finishing:
+
+1. Re-read the original task and explicit user constraints.
+2. Compare each material requirement with the actual workspace changes and
+   observed evidence.
+3. When relevant, look for omitted boundary, failure, compatibility, or
+   regression behavior.
+4. Do not treat visible tests passing as sufficient evidence by itself.
+5. Do not preserve an observed behavior merely as compatibility when it
+   violates an applicable explicit workspace contract, unless that behavior
+   is expressly required.
+6. If a material gap exists, use the normal tools to address it. Otherwise,
+   return an honest, complete, standalone final response rather than merely
+   saying that the task is done.
+```
+
+Secondary guidance 可以简短要求优先复用 repository-supported verification、优先保留有价值的永久回归测试，并避免为了简单检查创建一次性 workspace artifact；不得将其扩展成所有任务必须补测试、必须执行某种命令或必须成功验证的固定 QA workflow。
+
+CompletionAuditInstruction 是 request-local `RuntimeInstructionMessage`，不包含或复制 Candidate 文本。Candidate 已按真实 assistant role 位于它之前的 current-Run Context。真实 DeepSeek thinking-mode Tool workflow evidence 表明，同一 Run 回放 generated AssistantMessage 时必须同时回放 provider `reasoning_content`，且 Assistant 后的新指令需要形成 provider 可识别的新对话轮次；05 因此定义了窄的 internal-only continuation field 与 RuntimeInstructionMessage。二者不得展示或被 Prompt policy 当作用户输入解释，也不扩展为通用 provider metadata framework。
 
 ---
 
@@ -2001,6 +2054,10 @@ Model-visible Context 与 human-visible execution log 是两个不同输出面�
 47. Semantic Relevance 是 model-dependent soft guidance，不替代 Runtime-enforced constraints 或 permission。
 48. RepeatedActionWarning 是否产生由 04 / Runtime 决定；07 只负责 deterministic request-local presentation。
 49. Retained historical messages不得被新 Run 的 trusted constraint normalizer重新处理。
+50. CompletionAuditInstruction 是 request-local transient `RuntimeInstructionMessage`，只在 04 的 self-audit active 时出现，不写入 normal history 或 Session continuity，内部语义不得伪装为用户输入。
+51. Pending Candidate Final 以 hidden AssistantMessage 进入 current-Run Model Context；它不拼入 System Prompt、不伪装为 UserMessage、不成为 user-facing Final，也不进入 completed-run continuity。
+52. Self-audit active 期间，Initial User Task、pending Candidate、Explicit Task Constraints presentation 与 CompletionAuditInstruction 属于 mandatory audit context；不得通过普通 eviction 删除。
+53. Pending Candidate 和 internal provider reasoning continuation 不进入 completed-run continuity；只有 sanitized 真正 Final 与 Initial User Task 形成 continuity pair。
 
 ---
 
@@ -2054,12 +2111,14 @@ estimate_context_size(...)
 * persistent-per-Run、request-local Context Truncation Notice；
 * ToolResult model-visible projection；
 * RepeatedActionWarning presentation contract；
+* CompletionAuditInstruction presentation、hidden Candidate current-Run retention 与 continuity exclusion contract；
 * Shell deterministic head + tail model-visible projection；
-* Effective System Prefix assembly and ordering：Stable Base System Prompt 位于最前，request-local transient guidance 合入或形成最前面的 Effective System Prefix；Protocol Corrective Instruction 不作为普通末尾 history message，corrective re-prompt 满足 §39 / §40 / §41 的 placement contract；
+* request-local instruction assembly and ordering：Stable Base System Prompt 位于最前，Protocol Corrective Instruction 合入该 prefix；CompletionAuditInstruction 作为 Candidate 后的 RuntimeInstructionMessage，满足 §39 / §40 / §41 的 placement contract；
 * mandatory-context overflow failure mapping：ContextManager 报告 unrecoverable context-construction failure，AgentRuntime 使用 existing fatal Runtime failure path 将 Run 终止为 `FAILED`，不发出下一次 Model Turn，且不新增 public error taxonomy；
 * Context tests；
 * projection tests；
 * transient-guidance ordering tests；
+* completion-self-audit mandatory-context / Candidate retention and continuity exclusion tests；
 * corrective re-prompt placement tests；
 * `history_incomplete` lifecycle tests；
 * mandatory-context overflow failure-mapping tests。

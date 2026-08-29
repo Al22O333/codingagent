@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
 from typing import TypeAlias, cast
@@ -132,14 +132,31 @@ class UserMessage:
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeInstructionMessage:
+    """Request-local Runtime control instruction, never user-authored history."""
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
 class AssistantMessage:
     """Provider-neutral assistant message, optionally containing tool calls."""
 
     text: str | None
     tool_calls: tuple[ToolCall, ...] = ()
+    provider_reasoning_content: str | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tool_calls", tuple(self.tool_calls))
+        if (
+            self.provider_reasoning_content is not None
+            and not isinstance(self.provider_reasoning_content, str)
+        ):
+            raise TypeError("provider_reasoning_content must be text or None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,7 +170,11 @@ class ToolResultMessage:
 
 
 InternalMessage: TypeAlias = (
-    SystemMessage | UserMessage | AssistantMessage | ToolResultMessage
+    SystemMessage
+    | UserMessage
+    | RuntimeInstructionMessage
+    | AssistantMessage
+    | ToolResultMessage
 )
 
 
@@ -191,9 +212,19 @@ class ModelResponse:
     text: str | None
     tool_calls: tuple[ToolCall, ...] = ()
     usage: ModelUsage | None = None
+    provider_reasoning_content: str | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tool_calls", tuple(self.tool_calls))
+        if (
+            self.provider_reasoning_content is not None
+            and not isinstance(self.provider_reasoning_content, str)
+        ):
+            raise TypeError("provider_reasoning_content must be text or None")
 
 
 __all__ = [
@@ -202,6 +233,7 @@ __all__ = [
     "ModelRequest",
     "ModelResponse",
     "ModelUsage",
+    "RuntimeInstructionMessage",
     "SystemMessage",
     "ToolCall",
     "ToolCapability",

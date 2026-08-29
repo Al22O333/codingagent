@@ -288,7 +288,11 @@ def test_protected_mutation_deny_has_no_workspace_side_effect(tmp_path: Path) ->
         },
     )
     client = FakeModelClient(
-        [ModelResponse(None, (call,)), ModelResponse("Mutation denied.")]
+        [
+            ModelResponse(None, (call,)),
+            ModelResponse("Mutation denied."),
+            ModelResponse("Mutation denied after review."),
+        ]
     )
     runtime = AgentRuntime(
         client,

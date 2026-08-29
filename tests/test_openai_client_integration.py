@@ -10,7 +10,15 @@ from coding_agent.openai_client import (
     OpenAICompatibleConfig,
     OpenAICompatibleModelClient,
 )
-from coding_agent.protocol import ModelRequest, ToolKind, ToolSpec, UserMessage
+from coding_agent.protocol import (
+    AssistantMessage,
+    ModelRequest,
+    RuntimeInstructionMessage,
+    SystemMessage,
+    ToolKind,
+    ToolSpec,
+    UserMessage,
+)
 
 
 _API_KEY = os.getenv("CODING_AGENT_TEST_API_KEY")
@@ -40,6 +48,68 @@ def test_real_provider_no_tool_final_smoke() -> None:
     )
     assert response.text is not None and response.text.strip()
     assert response.tool_calls == ()
+
+
+@pytest.mark.skipif(
+    not _HAS_PROVIDER,
+    reason="set CODING_AGENT_TEST_API_KEY and CODING_AGENT_TEST_MODEL",
+)
+def test_real_provider_accepts_assistant_last_continuation() -> None:
+    response = _real_client().complete(
+        ModelRequest(
+            messages=(
+                SystemMessage(
+                    "The last assistant message is a candidate response, not "
+                    "a submitted final answer. Continue the conversation and "
+                    "reply with exactly: audit-ready"
+                ),
+                UserMessage("Prepare a candidate response."),
+                AssistantMessage(text="Candidate response."),
+            )
+        )
+    )
+
+    assert response.text is not None and response.text.strip()
+    assert response.tool_calls == ()
+
+
+@pytest.mark.skipif(
+    not _HAS_PROVIDER,
+    reason="set CODING_AGENT_TEST_API_KEY and CODING_AGENT_TEST_MODEL",
+)
+def test_real_provider_accepts_candidate_followed_by_tail_system_audit() -> None:
+    client = _real_client()
+    candidate = client.complete(
+        ModelRequest(
+            messages=(
+                UserMessage(
+                    "Draft a one-sentence candidate answer saying the task is done."
+                ),
+            )
+        )
+    )
+    assert candidate.text is not None
+
+    audited = client.complete(
+        ModelRequest(
+            messages=(
+                UserMessage(
+                    "Draft a one-sentence candidate answer saying the task is done."
+                ),
+                AssistantMessage(
+                    text=candidate.text,
+                    provider_reasoning_content=candidate.provider_reasoning_content,
+                ),
+                RuntimeInstructionMessage(
+                    "The previous assistant response is a hidden candidate. "
+                    "Return a complete final answer that says exactly: audit-ready"
+                ),
+            )
+        )
+    )
+
+    assert audited.text is not None and "audit-ready" in audited.text.lower()
+    assert audited.tool_calls == ()
 
 
 @pytest.mark.skipif(

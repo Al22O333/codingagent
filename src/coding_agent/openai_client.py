@@ -30,6 +30,7 @@ from .protocol import (
     ModelRequest,
     ModelResponse,
     ModelUsage,
+    RuntimeInstructionMessage,
     SystemMessage,
     ToolCall,
     ToolResultMessage,
@@ -106,11 +107,15 @@ class OpenAICompatibleModelClient:
                 wire.append({"role": "system", "content": message.text})
             elif isinstance(message, UserMessage):
                 wire.append({"role": "user", "content": message.text})
+            elif isinstance(message, RuntimeInstructionMessage):
+                wire.append({"role": "user", "content": message.text})
             elif isinstance(message, AssistantMessage):
                 item: dict[str, object] = {
                     "role": "assistant",
                     "content": message.text,
                 }
+                if message.provider_reasoning_content is not None:
+                    item["reasoning_content"] = message.provider_reasoning_content
                 if message.tool_calls:
                     item["tool_calls"] = [
                         {
@@ -166,6 +171,11 @@ class OpenAICompatibleModelClient:
         text = getattr(message, "content", None)
         if text is not None and not isinstance(text, str):
             raise ModelProtocolError("provider assistant content is not text")
+        reasoning_content = getattr(message, "reasoning_content", None)
+        if reasoning_content is not None and not isinstance(reasoning_content, str):
+            raise ModelProtocolError(
+                "provider assistant reasoning continuation is not text"
+            )
 
         normalized_calls: list[ToolCall] = []
         for provider_call in getattr(message, "tool_calls", None) or ():
@@ -211,6 +221,7 @@ class OpenAICompatibleModelClient:
             text=text,
             tool_calls=tuple(normalized_calls),
             usage=usage,
+            provider_reasoning_content=reasoning_content,
         )
 
 

@@ -5,11 +5,12 @@ from __future__ import annotations
 from .protocol import (
     AssistantMessage,
     InternalMessage,
+    RuntimeInstructionMessage,
     SystemMessage,
     ToolResultMessage,
     UserMessage,
 )
-from .prompt import build_system_prefix
+from .prompt import COMPLETION_AUDIT_INSTRUCTION, build_system_prefix
 from .projection import project_tool_result_message
 
 
@@ -39,6 +40,7 @@ class ContextManager:
         self._completed_run_continuity: list[tuple[InternalMessage, ...]] = []
         self._messages: list[InternalMessage] = []
         self._pending_tool_calls: dict[str, str] = {}
+        self._pending_candidate: AssistantMessage | None = None
         self._run_active = False
         self._history_incomplete = False
 
@@ -52,6 +54,7 @@ class ContextManager:
         if self._run_active:
             raise ContextOrderError("cannot start a run while another run is active")
         self._pending_tool_calls.clear()
+        self._pending_candidate = None
         self._messages = [message]
         self._run_active = True
         self._history_incomplete = False
@@ -69,6 +72,7 @@ class ContextManager:
             self._completed_run_continuity.clear()
         self._messages.clear()
         self._pending_tool_calls.clear()
+        self._pending_candidate = None
         self._run_active = False
 
     def record_user_message(self, message: UserMessage) -> None:
@@ -90,6 +94,19 @@ class ContextManager:
         self._pending_tool_calls.update(
             (call.call_id, call.name) for call in message.tool_calls
         )
+
+    def record_candidate_message(self, message: AssistantMessage) -> None:
+        """Record and protect the one hidden completion-audit candidate."""
+        if message.tool_calls:
+            raise ContextOrderError("completion candidate must not contain tool calls")
+        if self._pending_candidate is not None:
+            raise ContextOrderError("a completion candidate is already pending")
+        self.record_assistant_message(message)
+        self._pending_candidate = message
+
+    def clear_pending_candidate(self) -> None:
+        """Stop protecting a candidate after terminal audit resolution."""
+        self._pending_candidate = None
 
     def record_tool_result_message(self, message: ToolResultMessage) -> None:
         """Append results only after their corresponding assistant tool calls."""
@@ -176,31 +193,53 @@ class ContextManager:
         self,
         *,
         repeated_action_warning: str | None = None,
+        completion_audit_active: bool = False,
         corrective_instruction: str | None = None,
     ) -> tuple[InternalMessage, ...]:
-        """Build a bounded snapshot with one request-local system prefix."""
+        """Build a bounded snapshot with prefix and optional Runtime instruction."""
 
         prefix = build_system_prefix(
             history_incomplete=self._history_incomplete,
             repeated_action_warning=repeated_action_warning,
+            completion_audit_active=False,
+            corrective_instruction=corrective_instruction,
+        )
+        tail_instructions = self._tail_instructions(
+            completion_audit_active=completion_audit_active,
             corrective_instruction=corrective_instruction,
         )
         previously_incomplete = self._history_incomplete
-        messages_with_tail_prefix = self._build_bounded_messages(
-            (prefix,),
+        messages_with_request_instructions = self._build_bounded_messages(
+            (prefix, *tail_instructions),
             project_tool_results=True,
         )
         if not previously_incomplete and self._history_incomplete:
             prefix = build_system_prefix(
                 history_incomplete=True,
                 repeated_action_warning=repeated_action_warning,
+                completion_audit_active=False,
                 corrective_instruction=corrective_instruction,
             )
-            messages_with_tail_prefix = self._build_bounded_messages(
-                (prefix,),
+            messages_with_request_instructions = self._build_bounded_messages(
+                (prefix, *tail_instructions),
                 project_tool_results=True,
             )
-        return (prefix, *messages_with_tail_prefix[:-1])
+        instruction_count = 1 + len(tail_instructions)
+        retained_history = messages_with_request_instructions[:-instruction_count]
+        return (prefix, *retained_history, *tail_instructions)
+
+    @staticmethod
+    def _tail_instructions(
+        *,
+        completion_audit_active: bool,
+        corrective_instruction: str | None,
+    ) -> tuple[RuntimeInstructionMessage, ...]:
+        instructions: list[RuntimeInstructionMessage] = []
+        if completion_audit_active:
+            instructions.append(
+                RuntimeInstructionMessage(COMPLETION_AUDIT_INSTRUCTION)
+            )
+        return tuple(instructions)
 
     @staticmethod
     def _project_unit(
@@ -219,7 +258,10 @@ class ContextManager:
         final = self._messages[-1]
         if not isinstance(final, AssistantMessage) or final.tool_calls:
             return None
-        return (self._messages[0], final)
+        return (
+            self._messages[0],
+            AssistantMessage(text=final.text, tool_calls=()),
+        )
 
     def _current_message_units(self) -> list[tuple[InternalMessage, ...]]:
         units: list[tuple[InternalMessage, ...]] = []
@@ -238,8 +280,8 @@ class ContextManager:
             index += 1
         return units
 
-    @staticmethod
     def _protected_current_unit_indexes(
+        self,
         units: list[tuple[InternalMessage, ...]],
     ) -> set[int]:
         protected = {
@@ -257,6 +299,12 @@ class ContextManager:
         ]
         if tool_units:
             protected.add(tool_units[-1])
+        if self._pending_candidate is not None:
+            protected.update(
+                index
+                for index, unit in enumerate(units)
+                if any(message is self._pending_candidate for message in unit)
+            )
         return protected
 
     @staticmethod
@@ -268,7 +316,13 @@ class ContextManager:
     @staticmethod
     def _units_size(units: list[tuple[InternalMessage, ...]]) -> int:
         """Return one centralized provider-neutral character approximation."""
-        return sum(len(repr(message)) for unit in units for message in unit)
+        size = 0
+        for unit in units:
+            for message in unit:
+                size += len(repr(message))
+                if isinstance(message, AssistantMessage):
+                    size += len(message.provider_reasoning_content or "")
+        return size
 
 
 __all__ = ["ContextLimitError", "ContextManager", "ContextOrderError"]

@@ -41,6 +41,10 @@ boundary value. Passing a limited visible test suite does not justify claiming
 success when an observed relevant constraint remains unimplemented or
 unverified.
 
+Compatibility protects supported behavior; it does not require preserving an
+observed behavior that violates an applicable explicit workspace contract,
+unless the user or workspace documentation expressly requires that behavior.
+
 After making changes, perform relevant practical verification when appropriate.
 Treat tool failures and unsuccessful command outcomes as observations to reason
 from rather than reasons to blindly repeat the same action. If meaningful
@@ -93,11 +97,33 @@ removed to stay within the context limit. The current workspace remains the
 source of truth. Re-inspect relevant files or state if you need information
 that may no longer be visible."""
 
+COMPLETION_AUDIT_INSTRUCTION = """[Runtime control instruction; not user-authored]
+Your previous assistant response is a candidate answer that has not been shown
+to the user. Perform one bounded completion self-audit before finishing:
+
+1. Re-read the original task and explicit user constraints.
+2. Compare each material requirement with the actual workspace changes and
+   observed evidence.
+3. When relevant, look for omitted boundary, failure, compatibility, or
+   regression behavior.
+4. Do not treat visible tests passing as sufficient evidence by itself.
+5. Do not preserve an observed behavior merely as compatibility when it
+   violates an applicable explicit workspace contract, unless that behavior
+   is expressly required.
+6. If a material gap exists, use the normal tools to address it. Otherwise,
+   return an honest, complete, standalone final response rather than merely
+   saying that the task is done.
+
+Prefer repository-supported verification and durable regression tests when
+they are relevant. Avoid creating disposable workspace files merely to perform
+a simple check, and do not turn this review into a fixed test checklist."""
+
 
 def build_system_prefix(
     *,
     history_incomplete: bool,
     repeated_action_warning: str | None = None,
+    completion_audit_active: bool = False,
     corrective_instruction: str | None = None,
 ) -> SystemMessage:
     """Assemble one deterministic request-local Effective System Prefix."""
@@ -107,6 +133,8 @@ def build_system_prefix(
         parts.append(CONTEXT_TRUNCATION_NOTICE)
     if repeated_action_warning:
         parts.append(repeated_action_warning)
+    if completion_audit_active:
+        parts.append(COMPLETION_AUDIT_INSTRUCTION)
     if corrective_instruction:
         parts.append(corrective_instruction)
     return SystemMessage(text="\n\n".join(parts))
@@ -114,6 +142,7 @@ def build_system_prefix(
 
 __all__ = [
     "BASE_SYSTEM_PROMPT",
+    "COMPLETION_AUDIT_INSTRUCTION",
     "CONTEXT_TRUNCATION_NOTICE",
     "build_system_prefix",
 ]

@@ -5,6 +5,7 @@ import pytest
 from coding_agent.context import ContextLimitError, ContextManager, ContextOrderError
 from coding_agent.protocol import (
     AssistantMessage,
+    RuntimeInstructionMessage,
     SystemMessage,
     ToolCall,
     ToolOutcome,
@@ -14,7 +15,9 @@ from coding_agent.protocol import (
 )
 from coding_agent.prompt import (
     BASE_SYSTEM_PROMPT,
+    COMPLETION_AUDIT_INSTRUCTION,
     CONTEXT_TRUNCATION_NOTICE,
+    build_system_prefix,
 )
 
 
@@ -291,6 +294,8 @@ def test_effective_system_prefix_is_request_local_and_deterministically_ordered(
     assert "map each one to implementation evidence and verification evidence" in normalized_prefix
     assert "verify both the accepted side and the rejected side" in normalized_prefix
     assert "Passing a limited visible test suite does not justify claiming success" in normalized_prefix
+    assert "Compatibility protects supported behavior" in normalized_prefix
+    assert "violates an applicable explicit workspace contract" in normalized_prefix
     assert "explicitly says a required product behavior" in normalized_prefix
     assert "use ask_user before choosing or implementing" in normalized_prefix
     assert "Keep any action likely to require user permission" in normalized_prefix
@@ -301,6 +306,77 @@ def test_effective_system_prefix_is_request_local_and_deterministically_ordered(
     assert prefix.index("REPEAT_WARNING") < prefix.index("CORRECTIVE_INSTRUCTION")
     assert prefix.endswith("CORRECTIVE_INSTRUCTION")
     assert context.build_messages() == (UserMessage("Task"),)
+
+
+def test_completion_audit_instruction_is_transient_and_mandatory_context_retained() -> None:
+    task = UserMessage("Change the parser")
+    old_call = AssistantMessage(None, (_tool_call("old"),))
+    old_result = ToolResultMessage(
+        (_tool_result_with_text("old", "x" * 20_000),)
+    )
+    latest_call = AssistantMessage(None, (_tool_call("latest"),))
+    latest_result = ToolResultMessage((_tool_result("latest"),))
+    candidate = AssistantMessage(
+        "Candidate answer",
+        provider_reasoning_content="r" * 200,
+    )
+    prefix = build_system_prefix(
+        history_incomplete=False,
+        completion_audit_active=True,
+    )
+    mandatory_size = sum(
+        len(repr(message))
+        for message in (prefix, task, latest_call, latest_result, candidate)
+    ) + len(candidate.provider_reasoning_content or "")
+    context = ContextManager(max_context_chars=mandatory_size + 500)
+    context.start_run(task)
+    context.record_assistant_message(old_call)
+    context.record_tool_result_message(old_result)
+    context.record_assistant_message(latest_call)
+    context.record_tool_result_message(latest_result)
+    context.record_candidate_message(candidate)
+
+    messages = context.build_model_messages(completion_audit_active=True)
+
+    assert isinstance(messages[0], SystemMessage)
+    assert isinstance(messages[-1], RuntimeInstructionMessage)
+    assert messages[-1].text == COMPLETION_AUDIT_INSTRUCTION
+    assert old_call not in messages
+    assert old_result not in messages
+    assert task in messages
+    assert latest_call in messages
+    assert latest_result in messages
+    assert candidate in messages
+    assert COMPLETION_AUDIT_INSTRUCTION not in repr(context.build_messages())
+
+
+def test_candidate_and_provider_reasoning_are_not_retained_across_runs() -> None:
+    context = ContextManager()
+    context.start_run(UserMessage("Change it"))
+    context.record_candidate_message(
+        AssistantMessage(
+            "Early answer",
+            provider_reasoning_content="private-early-reasoning",
+        )
+    )
+    context.record_assistant_message(
+        AssistantMessage(
+            "Real final",
+            provider_reasoning_content="private-final-reasoning",
+        )
+    )
+    context.clear_pending_candidate()
+    context.end_run(completed=True)
+    context.start_run(UserMessage("Follow up"))
+
+    messages = context.build_messages()
+
+    assert messages == (
+        UserMessage("Change it"),
+        AssistantMessage("Real final"),
+        UserMessage("Follow up"),
+    )
+    assert "private-" not in repr(messages)
 
 
 def test_context_notice_is_added_after_destructive_eviction() -> None:
