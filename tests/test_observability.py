@@ -134,6 +134,30 @@ def test_observer_reports_policy_and_exact_permission_lifecycle(
     assert resolved.facts["decision"] == "REJECT"
 
 
+def test_empty_file_observation_reports_zero_lines_and_run_continues(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "empty.py").write_text("", encoding="utf-8")
+    resolver = WorkspacePathResolver(tmp_path)
+    registry = ToolRegistry()
+    registry.register(ReadFileTool(resolver, max_lines=20, max_bytes=4_096))
+    events: list[RuntimeEvent] = []
+    call = ToolCall("read-empty", "read_file", {"path": "empty.py"})
+    runtime = _runtime(
+        FakeModelClient([ModelResponse(None, (call,)), ModelResponse("Empty file read.")]),
+        events.append,
+        registry=registry,
+        resolver=resolver,
+    )
+
+    run = runtime.run("Read the empty file")
+
+    assert run.state is RunState.COMPLETED
+    tool_result = next(event for event in events if event.kind == "tool_result")
+    assert tool_result.facts["outcome"] == "SUCCESS"
+    assert tool_result.facts["line_count"] == 0
+
+
 def test_observer_reports_retry_corrective_and_budget_events() -> None:
     retry_events: list[RuntimeEvent] = []
     retry_runtime = _runtime(

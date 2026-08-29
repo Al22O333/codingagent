@@ -1014,7 +1014,11 @@ class AgentRuntime:
         }
         content = result.content
         if isinstance(content, ReadFileContent):
-            facts["line_count"] = max(0, content.end_line - content.start_line + 1)
+            facts["line_count"] = (
+                0
+                if content.end_line is None
+                else max(0, content.end_line - content.start_line + 1)
+            )
         elif isinstance(content, ListDirectoryContent):
             facts["result_count"] = len(content.entries)
         elif isinstance(content, SearchFilesContent):

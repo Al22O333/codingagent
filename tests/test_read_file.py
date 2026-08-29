@@ -75,6 +75,29 @@ def test_normal_text_read_has_model_facing_line_numbers(tmp_path: Path) -> None:
     )
 
 
+def test_empty_text_file_returns_successful_zero_line_observation(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "empty.py").write_text("", encoding="utf-8")
+    tool = _tool(workspace, max_lines=10)
+    arguments = ReadFileArguments(path="empty.py")
+
+    result = tool.execute(_prepare_inside(tool, arguments))
+
+    assert result.outcome is ToolOutcome.SUCCESS
+    assert result.content == ReadFileContent(
+        path="empty.py",
+        start_line=1,
+        end_line=None,
+        total_lines=0,
+        content="",
+        truncated=False,
+        next_start_line=None,
+    )
+
+
 def test_large_file_read_is_bounded_and_can_continue(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
