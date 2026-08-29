@@ -62,7 +62,7 @@ Tool 设计遵循以下原则：
 
 ## 3. v1 Tool Set
 
-v1 固定提供以下 11 个 Tool：
+v1 固定提供以下 12 个 Tool：
 
 ```text
 list_directory
@@ -70,6 +70,7 @@ search_files
 search_text
 read_file
 edit_file
+apply_edits
 create_file
 create_directory
 move_path
@@ -85,6 +86,7 @@ ask_user
 | `search_text`    | LOCAL       | `FILE_READ`         | 在 workspace 文本文件中搜索内容         |
 | `read_file`      | LOCAL       | `FILE_READ`         | bounded 地读取文本文件指定行范围          |
 | `edit_file`      | LOCAL       | `FILE_MUTATION`     | 使用 exact replacement 修改已有文本文件 |
+| `apply_edits`    | LOCAL       | `FILE_MUTATION`     | atomic 地应用一个文件内多个不重叠 exact edits |
 | `create_file`    | LOCAL       | `FILE_MUTATION`     | 创建新的文本文件                      |
 | `create_directory` | LOCAL     | `FILE_MUTATION`     | 创建一个新目录且不隐式创建 parent tree       |
 | `move_path`      | LOCAL       | `FILE_MUTATION`     | 在 workspace 内移动或重命名一个文件或目录     |
@@ -1406,7 +1408,49 @@ BINARY_FILE_UNSUPPORTED
 TEXT_DECODING_FAILED
 EDIT_TARGET_NOT_FOUND
 EDIT_MATCH_COUNT_MISMATCH
+EDIT_OVERLAP
 EDIT_WRITE_FAILED
+```
+
+---
+
+### 13.12 `apply_edits`: Atomic One-File Multi-Edit
+
+```python
+apply_edits(
+    path: str,
+    edits: list[
+        {
+            old_text: str,
+            new_text: str,
+            expected_count: int = 1,
+        }
+    ],
+)
+```
+
+`edits` 必须 non-empty且有固定最大条目数。每个条目的 `old_text`、`new_text`、`expected_count` 与 `edit_file` 完全同义；不新增 fuzzy、line-number、AST 或 diff syntax。
+
+execution 只读取一次 current file，形成一个 execution-time original snapshot。所有 edit 都只在该 original snapshot 上：
+
+1. 复用 `edit_file` 的 UTF-8 / binary / logical newline adaptation；
+2. 对每个 edit 统计 original snapshot 中的 non-overlapping exact matches；
+3. 在任何 mutation 前验证每个 `actual_count == expected_count`；
+4. 收集每一个 original match interval；
+5. 任意两个 edit 的 original intervals overlap时返回 `EDIT_OVERLAP`；
+6. 只有全部 count、staleness 与 overlap validation通过后，按 original interval顺序一次构造 updated content；
+7. 复用同一个 sibling temporary file + replace write mechanism。
+
+因此 earlier edit 产生的 `new_text` 不会成为 later edit 的匹配输入；edit ordering不会形成 sequential rewrite semantics。任何条目失败时 entire call 写入 0 bytes，不允许 partial apply。成功只返回 bounded summary：`path`、edit count、total replacement count、bytes before / after。
+
+首版明确不提供：
+
+```text
+multi-file transaction
+unified diff parser
+fuzzy patch
+AST guessing
+automatic overlap resolution
 ```
 
 ---
@@ -2573,6 +2617,8 @@ AST patch engine
 
 真实任务如果证明 exact replacement 明显阻碍 Agent 成功率，再基于 evidence 决定是否增加 patch mechanism。
 
+`apply_edits` 不属于上述 Patch DSL：它只把多个 typed exact replacement 应用于一个 original file snapshot，不接受 diff text、hunk context、fuzzy match或多文件输入。
+
 ---
 
 ### 24.4 Generic Existing-File Write Tool
@@ -2665,38 +2711,39 @@ v1 Tool layer必须保持：
 15. `edit_file` 使用 exact text replacement。
 16. `edit_file` 要求 `actual_count == expected_count`。
 17. Edit conflict 时 Runtime 不进行 fuzzy guess。
-18. `create_file` 为 create-only。
-19. `create_file` 不静默 overwrite existing file。
-20. `create_file` 不自动创建 parent directory tree。
-21. `create_directory` 只创建一个目标层级且不 overwrite。
-22. `move_path` 对 source 与 destination 同时执行 containment、Protected / Sensitive 与 WRITE_SCOPE 检查。
-23. `move_path` destination 默认且固定不得存在，不提供 overwrite 参数。
-24. `delete_path` 只支持一个普通文件或空目录，始终 exact-action CONFIRM。
-25. `delete_path` 不提供 recursive / force / glob / batch 能力；workspace root 与 non-empty directory DENY。
-26. Lifecycle Tool 不通过 Shell 实现，也不隐式处理 VCS 语义。
-27. File mutation 尽可能避免 partial write。
-28. 普通 text edit 不应自动改变整个文件的 line-ending style。
-29. Shell 接收完整 command string。
-30. Shell cwd 必须位于 workspace 内。
-31. Shell cwd 不被描述为 filesystem sandbox。
-32. Shell stdin 为 noninteractive。
-33. Shell execution 必须有 timeout。
-34. Shell stdout / stderr 必须 bounded。
-35. Shell process 成功结束但 exit code 非零属于 `UNSUCCESSFUL_COMMAND`。
-36. Command timeout / process launch failure 属于 `OPERATION_FAILURE`。
-37. `ask_user` 是 InteractionTool。
-38. `ask_user` 在 validation 后离开 LOCAL pipeline。
-39. Permission Confirmation 不是 Tool。
-40. `PreparedToolCall` 是 immutable value object，不是 subsystem。
-41. Static operation category 由 ToolSpec capability 表达。
-42. Dynamic operation facts 不重复静态 Tool category。
-43. Expected preparation failure 使用现有 `OPERATION_FAILURE` taxonomy。
-44. Tool 不拥有 Agent retry。
-45. Tool 不拥有 batch semantics。
-46. Tool 不拥有 Context policy。
-47. Tool 不拥有 Runtime lifecycle。
-48. Tool 不自行扩大用户 Task Scope。
-49. Safety decision 始终由 Runtime / PolicyEngine 依据 03 contract 处理。
+18. `apply_edits` 只作用一个 original file snapshot；任一 count / overlap failure 都必须零写入。
+19. `create_file` 为 create-only。
+20. `create_file` 不静默 overwrite existing file。
+21. `create_file` 不自动创建 parent directory tree。
+22. `create_directory` 只创建一个目标层级且不 overwrite。
+23. `move_path` 对 source 与 destination 同时执行 containment、Protected / Sensitive 与 WRITE_SCOPE 检查。
+24. `move_path` destination 默认且固定不得存在，不提供 overwrite 参数。
+25. `delete_path` 只支持一个普通文件或空目录，始终 exact-action CONFIRM。
+26. `delete_path` 不提供 recursive / force / glob / batch 能力；workspace root 与 non-empty directory DENY。
+27. Lifecycle Tool 不通过 Shell 实现，也不隐式处理 VCS 语义。
+28. File mutation 尽可能避免 partial write。
+29. 普通 text edit 不应自动改变整个文件的 line-ending style。
+30. Shell 接收完整 command string。
+31. Shell cwd 必须位于 workspace 内。
+32. Shell cwd 不被描述为 filesystem sandbox。
+33. Shell stdin 为 noninteractive。
+34. Shell execution 必须有 timeout。
+35. Shell stdout / stderr 必须 bounded。
+36. Shell process 成功结束但 exit code 非零属于 `UNSUCCESSFUL_COMMAND`。
+37. Command timeout / process launch failure 属于 `OPERATION_FAILURE`。
+38. `ask_user` 是 InteractionTool。
+39. `ask_user` 在 validation 后离开 LOCAL pipeline。
+40. Permission Confirmation 不是 Tool。
+41. `PreparedToolCall` 是 immutable value object，不是 subsystem。
+42. Static operation category 由 ToolSpec capability 表达。
+43. Dynamic operation facts 不重复静态 Tool category。
+44. Expected preparation failure 使用现有 `OPERATION_FAILURE` taxonomy。
+45. Tool 不拥有 Agent retry。
+46. Tool 不拥有 batch semantics。
+47. Tool 不拥有 Context policy。
+48. Tool 不拥有 Runtime lifecycle。
+49. Tool 不自行扩大用户 Task Scope。
+50. Safety decision 始终由 Runtime / PolicyEngine 依据 03 contract 处理。
 
 ---
 
@@ -2737,15 +2784,17 @@ Final
 
 7. edit_file
 
-8. create_file
+8. apply_edits
 
-9. ask_user
+9. create_file
 
-10. create_directory
+10. ask_user
 
-11. move_path
+11. create_directory
 
-12. delete_path
+12. move_path
+
+13. delete_path
 ```
 
 其中第一条最小 vertical slice 可以只有：

@@ -16,7 +16,11 @@ from coding_agent.constraints import (
 from coding_agent.create_file import CreateFileTool
 from coding_agent.context import ContextManager
 from coding_agent.interaction import FakeUserInteraction
-from coding_agent.edit_file import EditFileArguments, EditFileTool
+from coding_agent.edit_file import (
+    ApplyEditsTool,
+    EditFileArguments,
+    EditFileTool,
+)
 from coding_agent.file_lifecycle import (
     CreateDirectoryTool,
     DeletePathTool,
@@ -102,7 +106,7 @@ def test_explicit_file_mutation_prohibition_is_hard_enforced(
     assert run.explicit_task_constraints.forbid_file_mutation is True
 
 
-@pytest.mark.parametrize("tool_name", ["edit_file", "create_file"])
+@pytest.mark.parametrize("tool_name", ["edit_file", "apply_edits", "create_file"])
 def test_audit_file_prohibition_rejects_mutation_tools_at_runtime(
     tmp_path: Path,
     tool_name: str,
@@ -115,6 +119,13 @@ def test_audit_file_prohibition_rejects_mutation_tools_at_runtime(
         target.write_bytes(b"old")
         tool = EditFileTool(resolver)
         arguments = {"path": "main.py", "old_text": "old", "new_text": "new"}
+    elif tool_name == "apply_edits":
+        target.write_bytes(b"old")
+        tool = ApplyEditsTool(resolver)
+        arguments = {
+            "path": "main.py",
+            "edits": [{"old_text": "old", "new_text": "new"}],
+        }
     else:
         tool = CreateFileTool(resolver)
         arguments = {"path": "main.py", "content": "new"}
@@ -131,7 +142,7 @@ def test_audit_file_prohibition_rejects_mutation_tools_at_runtime(
     assert result.error is not None
     assert result.error.code == "FORBID_FILE_MUTATION"
     assert run.explicit_task_constraints.forbid_file_mutation is True
-    if tool_name == "edit_file":
+    if tool_name in {"edit_file", "apply_edits"}:
         assert target.read_bytes() == b"old"
     else:
         assert not target.exists()

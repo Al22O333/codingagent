@@ -8,7 +8,13 @@ from pathlib import Path
 import pytest
 
 from coding_agent.constraints import ConstraintDecision, ExplicitConstraintSnapshot
-from coding_agent.edit_file import EditFileArguments, EditFileTool
+from coding_agent.edit_file import (
+    ApplyEditsArguments,
+    ApplyEditsTool,
+    AtomicEditArguments,
+    EditFileArguments,
+    EditFileTool,
+)
 from coding_agent.file_lifecycle import (
     DeletePathArguments,
     DeletePathTool,
@@ -139,15 +145,26 @@ def test_protected_read_confirms_and_protected_mutation_denies(
         "edit",
         EditFileArguments(path=".git/config", old_text="old", new_text="new"),
     )
+    apply_edits = _prepare(
+        ApplyEditsTool(resolver),
+        "apply",
+        ApplyEditsArguments(
+            path=".git/config",
+            edits=(AtomicEditArguments(old_text="old", new_text="new"),),
+        ),
+    )
     policy = PolicyEngine()
 
     read_result = policy.check_risk_permission(read)
     edit_result = policy.check_risk_permission(edit)
+    apply_result = policy.check_risk_permission(apply_edits)
 
     assert read_result.decision is PermissionDecision.CONFIRM
     assert read_result.reason_code == "PROTECTED_PATH_READ_CONFIRMATION"
     assert edit_result.decision is PermissionDecision.DENY
     assert edit_result.reason_code == "PROTECTED_PATH_MUTATION"
+    assert apply_result.decision is PermissionDecision.DENY
+    assert apply_result.reason_code == "PROTECTED_PATH_MUTATION"
 
 
 def test_outside_workspace_file_fact_is_denied(tmp_path: Path) -> None:

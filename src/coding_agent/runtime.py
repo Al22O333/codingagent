@@ -15,7 +15,7 @@ from pydantic import ValidationError
 from .ask_user import AskUserArguments
 from .create_file import CreateFileContent
 from .discovery import ListDirectoryContent, SearchFilesContent
-from .edit_file import EditFileContent
+from .edit_file import ApplyEditsContent, EditFileContent
 from .file_lifecycle import (
     CreateDirectoryContent,
     DeletePathContent,
@@ -1030,7 +1030,7 @@ class AgentRuntime:
             facts["result_count"] = len(content.matches)
         elif isinstance(content, SearchTextContent):
             facts["result_count"] = len(content.matches)
-        elif isinstance(content, EditFileContent):
+        elif isinstance(content, (ApplyEditsContent, EditFileContent)):
             facts["replacement_count"] = content.replacement_count
         elif isinstance(content, CreateFileContent):
             facts["created"] = True

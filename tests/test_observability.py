@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from coding_agent.context import ContextManager
+from coding_agent.edit_file import ApplyEditsTool
 from coding_agent.interaction import ConfirmationDecision, FakeUserInteraction
 from coding_agent.model_client import FakeModelClient, TransientProviderError
 from coding_agent.policy import PolicyEngine
@@ -156,6 +157,44 @@ def test_empty_file_observation_reports_zero_lines_and_run_continues(
     tool_result = next(event for event in events if event.kind == "tool_result")
     assert tool_result.facts["outcome"] == "SUCCESS"
     assert tool_result.facts["line_count"] == 0
+
+
+def test_apply_edits_observation_reports_total_replacements(tmp_path: Path) -> None:
+    (tmp_path / "values.txt").write_text("one two one\n", encoding="utf-8")
+    resolver = WorkspacePathResolver(tmp_path)
+    registry = ToolRegistry()
+    registry.register(ApplyEditsTool(resolver))
+    events: list[RuntimeEvent] = []
+    call = ToolCall(
+        "apply",
+        "apply_edits",
+        {
+            "path": "values.txt",
+            "edits": [
+                {"old_text": "one", "new_text": "1", "expected_count": 2},
+                {"old_text": "two", "new_text": "2"},
+            ],
+        },
+    )
+    runtime = _runtime(
+        FakeModelClient(
+            [
+                ModelResponse(None, (call,)),
+                ModelResponse("Candidate."),
+                ModelResponse("Done."),
+            ]
+        ),
+        events.append,
+        registry=registry,
+        resolver=resolver,
+    )
+
+    run = runtime.run("Update the values")
+
+    assert run.state is RunState.COMPLETED
+    tool_result = next(event for event in events if event.kind == "tool_result")
+    assert tool_result.facts["outcome"] == "SUCCESS"
+    assert tool_result.facts["replacement_count"] == 3
 
 
 def test_observer_reports_retry_corrective_and_budget_events() -> None:

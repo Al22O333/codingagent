@@ -15,7 +15,7 @@ from .config import AgentConfig, load_agent_config
 from .context import ContextManager
 from .create_file import CreateFileTool
 from .discovery import ListDirectoryTool, SearchFilesTool
-from .edit_file import EditFileTool
+from .edit_file import ApplyEditsTool, EditFileTool
 from .file_lifecycle import CreateDirectoryTool, DeletePathTool, MovePathTool
 from .interaction import (
     ClarificationRequest,
@@ -178,6 +178,7 @@ def build_runtime(
         SearchFilesTool(resolver, max_results=200),
         SearchTextTool(resolver, max_matches=100, max_line_bytes=4096),
         EditFileTool(resolver),
+        ApplyEditsTool(resolver),
         CreateFileTool(resolver),
         CreateDirectoryTool(resolver),
         MovePathTool(resolver),
@@ -302,6 +303,7 @@ def _render_event(
             "search_text": "搜索代码",
             "read_file": "读取文件",
             "edit_file": "修改文件",
+            "apply_edits": "批量修改文件",
             "create_file": "创建文件",
             "shell": "执行本地命令",
             "ask_user": "请求补充信息",
@@ -377,6 +379,7 @@ def _activity_group(tool_name: str, action: str) -> str | None:
         return "查看项目"
     if tool_name in {
         "edit_file",
+        "apply_edits",
         "create_file",
         "create_directory",
         "move_path",
@@ -527,6 +530,7 @@ def _human_error(code: str) -> str:
     return {
         "EDIT_TARGET_NOT_FOUND": "未找到预期的原始文本",
         "EDIT_MATCH_COUNT_MISMATCH": "预期文本的匹配数量不符合要求",
+        "EDIT_OVERLAP": "多个修改目标在原始文件中发生重叠",
         "EDIT_CONFLICT": "文件已经变化，本次修改未应用",
         "FILE_NOT_FOUND": "文件不存在",
         "FILE_ALREADY_EXISTS": "目标文件已经存在",
@@ -551,6 +555,7 @@ def _permission_operation(request: ConfirmationRequest) -> str:
         "shell": "运行本地命令",
         "read_file": "读取文件",
         "edit_file": "修改文件",
+        "apply_edits": "批量修改文件",
         "create_file": "创建文件",
         "create_directory": "创建目录",
         "move_path": "移动或重命名路径",
