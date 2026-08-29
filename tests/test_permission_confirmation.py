@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from coding_agent.context import ContextManager
+from coding_agent.file_lifecycle import DeletePathTool
 from coding_agent.interaction import (
     ConfirmationDecision,
     ConfirmationRequest,
@@ -89,6 +90,7 @@ def _runtime(
     interaction: ObservingInteraction,
     *,
     clock: FakeClock | None = None,
+    additional_tool=None,  # type: ignore[no-untyped-def]
 ) -> tuple[AgentRuntime, ContextManager, FakeModelClient]:
     registry = ToolRegistry()
     registry.register(
@@ -98,6 +100,8 @@ def _runtime(
             max_bytes=4096,
         )
     )
+    if additional_tool is not None:
+        registry.register(additional_tool)
     context = ContextManager()
     client = FakeModelClient(responses)
     runtime = AgentRuntime(
@@ -144,6 +148,41 @@ def test_approve_executes_exact_pending_action_and_cleans_state(tmp_path: Path) 
     assert run.pending_user_request is None
     assert run.wait_reason is None
     assert interaction.requests[0].action_summary == ".env"
+
+
+def test_delete_path_uses_exact_one_time_confirmation(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "obsolete.txt"
+    target.write_text("obsolete", encoding="utf-8")
+    interaction = ObservingInteraction((ConfirmationDecision.APPROVE,))
+    delete_call = ToolCall(
+        "delete-obsolete",
+        "delete_path",
+        {"path": "obsolete.txt"},
+    )
+    runtime, _, client = _runtime(
+        workspace,
+        [
+            ModelResponse(text=None, tool_calls=(delete_call,)),
+            ModelResponse(text="Candidate."),
+            ModelResponse(text="Deleted obsolete.txt after confirmation."),
+        ],
+        interaction,
+        additional_tool=DeletePathTool(WorkspacePathResolver(workspace)),
+    )
+
+    run = runtime.run("Delete obsolete.txt")
+
+    result = _first_results(client)[0]
+    assert interaction.observed_waiting
+    assert len(interaction.requests) == 1
+    assert interaction.requests[0].reason_code == "FILE_DELETE_CONFIRMATION"
+    assert interaction.requests[0].action_summary == "obsolete.txt"
+    assert result.outcome is ToolOutcome.SUCCESS
+    assert not target.exists()
+    assert run.state is RunState.COMPLETED
+    assert run.pending_action is None
 
 
 def test_approved_confirmation_ends_old_batch(tmp_path: Path) -> None:

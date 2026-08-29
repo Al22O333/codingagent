@@ -16,6 +16,7 @@ from .context import ContextManager
 from .create_file import CreateFileTool
 from .discovery import ListDirectoryTool, SearchFilesTool
 from .edit_file import EditFileTool
+from .file_lifecycle import CreateDirectoryTool, DeletePathTool, MovePathTool
 from .interaction import (
     ClarificationRequest,
     ClarificationResponse,
@@ -178,6 +179,9 @@ def build_runtime(
         SearchTextTool(resolver, max_matches=100, max_line_bytes=4096),
         EditFileTool(resolver),
         CreateFileTool(resolver),
+        CreateDirectoryTool(resolver),
+        MovePathTool(resolver),
+        DeletePathTool(resolver),
         ShellTool(
             resolver,
             ShellBackend(_platform_shell_executable()),
@@ -371,7 +375,13 @@ def _render_event(
 def _activity_group(tool_name: str, action: str) -> str | None:
     if tool_name in {"list_directory", "search_files", "search_text", "read_file"}:
         return "查看项目"
-    if tool_name in {"edit_file", "create_file"}:
+    if tool_name in {
+        "edit_file",
+        "create_file",
+        "create_directory",
+        "move_path",
+        "delete_path",
+    }:
         return "修改文件"
     if tool_name == "shell":
         if _classify_shell_presentation(action) in {"test", "build", "check"}:
@@ -396,6 +406,12 @@ def _normal_result_detail(event: RuntimeEvent) -> str:
         return f"已替换 {facts['replacement_count']} 处"
     if facts.get("created"):
         return "文件已创建"
+    if facts.get("created_directory"):
+        return "目录已创建"
+    if facts.get("moved"):
+        return "路径已移动或重命名"
+    if facts.get("deleted"):
+        return "路径已删除"
     if facts.get("line_count") is not None:
         return f"已读取 {facts['line_count']} 行"
     if facts.get("result_count") is not None:
@@ -514,6 +530,13 @@ def _human_error(code: str) -> str:
         "EDIT_CONFLICT": "文件已经变化，本次修改未应用",
         "FILE_NOT_FOUND": "文件不存在",
         "FILE_ALREADY_EXISTS": "目标文件已经存在",
+        "DIRECTORY_ALREADY_EXISTS": "目标目录已经存在",
+        "PATH_ALREADY_EXISTS": "目标路径已经存在",
+        "DESTINATION_ALREADY_EXISTS": "移动目标已经存在",
+        "DIRECTORY_NOT_EMPTY": "目录不是空目录",
+        "SYMLINK_UNSUPPORTED": "不支持对符号链接或重解析点执行此操作",
+        "MOVE_CONFLICT": "移动前路径状态已经变化",
+        "DELETE_TARGET_CHANGED": "删除前目标状态已经变化",
         "VALIDATION_ERROR": "工具参数无效",
         "POLICY_REJECTED": "操作被安全策略拒绝",
         "USER_REJECTED_CONFIRMATION": "你已拒绝本次操作",
@@ -529,6 +552,9 @@ def _permission_operation(request: ConfirmationRequest) -> str:
         "read_file": "读取文件",
         "edit_file": "修改文件",
         "create_file": "创建文件",
+        "create_directory": "创建目录",
+        "move_path": "移动或重命名路径",
+        "delete_path": "删除路径",
     }.get(request.tool_name, "执行本地操作")
 
 
@@ -538,6 +564,7 @@ def _permission_reason(reason_code: str) -> str:
         "SHELL_ACTION_CONFIRMATION": "该命令可能产生需要确认的本地或外部影响",
         "SENSITIVE_PATH_CONFIRMATION": "操作涉及可能包含敏感信息的文件",
         "PROTECTED_PATH_READ_CONFIRMATION": "操作需要读取受保护的项目元数据",
+        "FILE_DELETE_CONFIRMATION": "删除操作需要你批准这个精确目标",
     }.get(reason_code, "该操作需要你的明确批准")
 
 

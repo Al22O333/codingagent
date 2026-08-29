@@ -9,6 +9,12 @@ import pytest
 
 from coding_agent.constraints import ConstraintDecision, ExplicitConstraintSnapshot
 from coding_agent.edit_file import EditFileArguments, EditFileTool
+from coding_agent.file_lifecycle import (
+    DeletePathArguments,
+    DeletePathTool,
+    MovePathArguments,
+    MovePathTool,
+)
 from coding_agent.policy import PermissionDecision, PolicyEngine
 from coding_agent.read_file import ReadFileArguments, ReadFileTool
 from coding_agent.shell import ShellArguments, ShellBackend, ShellTool
@@ -53,6 +59,52 @@ def test_normal_file_read_and_mutation_are_allowed(tmp_path: Path) -> None:
 
     assert policy.check_risk_permission(read).decision is PermissionDecision.ALLOW
     assert policy.check_risk_permission(edit).decision is PermissionDecision.ALLOW
+
+
+def test_delete_file_confirms_but_nonempty_directory_and_root_deny(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "obsolete.txt").write_text("old", encoding="utf-8")
+    package = workspace / "package"
+    package.mkdir()
+    (package / "keep.txt").write_text("keep", encoding="utf-8")
+    tool = DeletePathTool(WorkspacePathResolver(workspace))
+    ordinary = _prepare(
+        tool, "ordinary", DeletePathArguments(path="obsolete.txt")
+    )
+    nonempty = _prepare(tool, "nonempty", DeletePathArguments(path="package"))
+    root = _prepare(tool, "root", DeletePathArguments(path="."))
+    policy = PolicyEngine()
+
+    ordinary_result = policy.check_risk_permission(ordinary)
+    assert ordinary_result.decision is PermissionDecision.CONFIRM
+    assert ordinary_result.reason_code == "FILE_DELETE_CONFIRMATION"
+    for prepared in (nonempty, root):
+        result = policy.check_risk_permission(prepared)
+        assert result.decision is PermissionDecision.DENY
+        assert result.reason_code == "RECURSIVE_DELETE_DENIED"
+
+
+def test_move_policy_checks_protected_destination_not_only_source(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "source.txt").write_text("source", encoding="utf-8")
+    (workspace / ".git").mkdir()
+    tool = MovePathTool(WorkspacePathResolver(workspace))
+    prepared = _prepare(
+        tool,
+        "move",
+        MovePathArguments(source="source.txt", destination=".git/source.txt"),
+    )
+
+    result = PolicyEngine().check_risk_permission(prepared)
+
+    assert result.decision is PermissionDecision.DENY
+    assert result.reason_code == "PROTECTED_PATH_MUTATION"
 
 
 def test_sensitive_read_requires_confirmation(tmp_path: Path) -> None:

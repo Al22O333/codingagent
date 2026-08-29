@@ -65,6 +65,16 @@ def test_workspace_root_is_canonicalized(tmp_path: Path) -> None:
     assert resolver.workspace_root.is_absolute()
 
 
+def test_bind_workspace_path_is_lexical_and_workspace_relative(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    resolver = WorkspacePathResolver(workspace)
+
+    assert resolver.bind_workspace_path("src/main.py") == workspace / "src/main.py"
+    absolute = tmp_path / "outside.txt"
+    assert resolver.bind_workspace_path(str(absolute)) == absolute
+
+
 def test_existing_relative_inside_path(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     target = workspace / "src" / "main.py"

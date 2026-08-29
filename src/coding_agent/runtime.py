@@ -16,6 +16,11 @@ from .ask_user import AskUserArguments
 from .create_file import CreateFileContent
 from .discovery import ListDirectoryContent, SearchFilesContent
 from .edit_file import EditFileContent
+from .file_lifecycle import (
+    CreateDirectoryContent,
+    DeletePathContent,
+    MovePathContent,
+)
 from .constraints import (
     ConstraintDecision,
     ExplicitConstraintSnapshot,
@@ -1029,6 +1034,12 @@ class AgentRuntime:
             facts["replacement_count"] = content.replacement_count
         elif isinstance(content, CreateFileContent):
             facts["created"] = True
+        elif isinstance(content, CreateDirectoryContent):
+            facts["created_directory"] = True
+        elif isinstance(content, MovePathContent):
+            facts["moved"] = True
+        elif isinstance(content, DeletePathContent):
+            facts["deleted"] = True
         elif isinstance(content, ShellContent):
             facts["exit_code"] = content.exit_code
             diagnostic = content.stderr.strip() or content.stdout.strip()

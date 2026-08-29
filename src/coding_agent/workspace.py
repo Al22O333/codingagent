@@ -16,6 +16,15 @@ class PathResolutionMode(StrEnum):
     NEW = "NEW"
 
 
+class FileOperationKind(StrEnum):
+    """Minimal dynamic operation kinds needed by file lifecycle policy."""
+
+    ACCESS = "ACCESS"
+    CREATE_DIRECTORY = "CREATE_DIRECTORY"
+    MOVE = "MOVE"
+    DELETE = "DELETE"
+
+
 @dataclass(frozen=True, slots=True)
 class ResolvedPath:
     """Immutable filesystem and classification facts for one requested path."""
@@ -42,9 +51,20 @@ class FileOperationFacts:
 
     target: ResolvedPath
     affected_paths: tuple[ResolvedPath, ...] = ()
+    operation: FileOperationKind = FileOperationKind.ACCESS
+    secondary_target: ResolvedPath | None = None
+    target_identity: tuple[int, int, int] | None = None
+    directory_nonempty: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "affected_paths", tuple(self.affected_paths))
+        if self.operation is FileOperationKind.MOVE:
+            if self.secondary_target is None:
+                raise ValueError("move facts require a secondary target")
+        elif self.secondary_target is not None:
+            raise ValueError("secondary target is only valid for move facts")
+        if self.directory_nonempty and self.operation is not FileOperationKind.DELETE:
+            raise ValueError("directory_nonempty is only valid for delete facts")
 
 
 class WorkspacePathResolver:
@@ -71,12 +91,7 @@ class WorkspacePathResolver:
         mode: PathResolutionMode,
     ) -> ResolvedPath:
         """Resolve a requested path into facts without making a policy decision."""
-        requested_path = Path(raw_path)
-        bound_path = (
-            requested_path
-            if requested_path.is_absolute()
-            else self._workspace_root / requested_path
-        )
+        bound_path = self.bind_workspace_path(raw_path)
 
         if mode is PathResolutionMode.EXISTING:
             resolved_path = bound_path.resolve(strict=True)
@@ -107,6 +122,15 @@ class WorkspacePathResolver:
             is_protected=any(
                 self._path_is_protected(path) for path in classification_paths
             ),
+        )
+
+    def bind_workspace_path(self, raw_path: str) -> Path:
+        """Bind a raw path lexically for final-entry race and reparse checks."""
+        requested_path = Path(raw_path)
+        return (
+            requested_path
+            if requested_path.is_absolute()
+            else self._workspace_root / requested_path
         )
 
     def _resolve_new_path(self, bound_path: Path) -> Path:
@@ -189,6 +213,7 @@ class WorkspacePathResolver:
 
 
 __all__ = [
+    "FileOperationKind",
     "FileOperationFacts",
     "PathResolutionMode",
     "ResolvedPath",

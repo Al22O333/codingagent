@@ -62,7 +62,7 @@ Tool 设计遵循以下原则：
 
 ## 3. v1 Tool Set
 
-v1 固定提供以下 8 个 Tool：
+v1 固定提供以下 11 个 Tool：
 
 ```text
 list_directory
@@ -71,6 +71,9 @@ search_text
 read_file
 edit_file
 create_file
+create_directory
+move_path
+delete_path
 shell
 ask_user
 ```
@@ -83,16 +86,15 @@ ask_user
 | `read_file`      | LOCAL       | `FILE_READ`         | bounded 地读取文本文件指定行范围          |
 | `edit_file`      | LOCAL       | `FILE_MUTATION`     | 使用 exact replacement 修改已有文本文件 |
 | `create_file`    | LOCAL       | `FILE_MUTATION`     | 创建新的文本文件                      |
+| `create_directory` | LOCAL     | `FILE_MUTATION`     | 创建一个新目录且不隐式创建 parent tree       |
+| `move_path`      | LOCAL       | `FILE_MUTATION`     | 在 workspace 内移动或重命名一个文件或目录     |
+| `delete_path`    | LOCAL       | `FILE_MUTATION`     | 经确认删除一个普通文件或空目录              |
 | `shell`          | LOCAL       | `COMMAND_EXECUTION` | 运行测试、构建、编译和其他项目命令             |
 | `ask_user`       | INTERACTION | —                   | 在当前 Run 中向用户请求澄清              |
 
 v1 不提供 dedicated：
 
 ```text
-delete_file
-delete_directory
-move_file
-rename_file
 git_* tools
 apply_patch DSL
 whole-file overwrite tool
@@ -102,7 +104,7 @@ interactive debugger
 language-specific execution tools
 ```
 
-这些能力不属于 M1 主流程的必要条件。
+其中不提供的能力不属于当前核心流程的必要条件。
 
 其中一部分操作可以在 03 的 Risk Permission 允许时通过 `shell` 完成，但 Shell 的存在不改变 File Tool 的安全边界，也不意味着 Runtime 能将 Shell 当作 filesystem sandbox。
 
@@ -1528,6 +1530,63 @@ FILE_WRITE_FAILED
 
 ---
 
+## 14A. Minimal File Lifecycle Tools
+
+### 14A.1 `create_directory`
+
+```python
+create_directory(path: str)
+```
+
+只创建一个 absent directory target。direct parent 必须已经存在且为 directory；不提供 `parents` 参数，不隐式创建其他层级。existing directory 返回 `DIRECTORY_ALREADY_EXISTS`，existing non-directory 返回 `PATH_ALREADY_EXISTS`。execution 使用 OS single-directory create，因此 destination race 不覆盖任何 existing entry。
+
+### 14A.2 `move_path`
+
+```python
+move_path(source: str, destination: str)
+```
+
+统一表达 rename 与 move，并支持普通 regular file 与 directory。source 使用 Existing Path resolution，destination 使用 New Path resolution；两者都进入同一个 `FileOperationFacts.affected_paths`，因此 workspace containment、Sensitive / Protected Path 与 `WRITE_SCOPE` 同时覆盖 source 和 destination。destination direct parent 必须存在；destination 已存在时固定失败，不提供 overwrite 参数，不自动解释 Git/VCS 语义。
+
+source 为 workspace root、final symlink / junction / reparse entry、unsupported special file，或 directory destination 位于 source 自身内部时固定失败。Windows execution 使用 `os.rename`，其 existing-destination 失败语义与 execution-time destination recheck共同保证不静默 overwrite。其他平台若 local rename primitive 不能维持同一 contract，应返回 operation failure 而不是降级为 overwrite。
+
+execution 重新解析 source / destination、核对 prepared source identity并检查 destination 仍 absent。source 消失、identity 改变、destination 出现或 parent 改变都产生 structured conflict / race failure，不执行替代复制、递归删除或 partial fallback。
+
+### 14A.3 `delete_path`
+
+```python
+delete_path(path: str)
+```
+
+首版只支持一个 ordinary regular file 或一个 empty directory；schema 不提供 `recursive`、glob、batch 或 force flag。所有允许的 delete 都在 03 中固定为 `CONFIRM`，approval 只覆盖 immutable PendingAction 的一次 exact execution attempt。
+
+workspace root 与 non-empty directory 在 execution 前由 Risk Permission `DENY`。final symlink / junction / reparse entry 和 unsupported special file不删除。批准后 execution 必须重新解析并核对 prepared identity：目标消失、目标 identity / type 改变、empty directory变为 non-empty或其他 race都返回 structured failure。file 使用 exact unlink，directory 使用 `rmdir`；不 follow symlink，不 recursive fallback。
+
+### 14A.4 Results and Errors
+
+三个 Tool 只返回 bounded summary（workspace-relative path、source/destination、entry type）；不回显文件内容或目录树。主要 structured errors：
+
+```text
+DIRECTORY_ALREADY_EXISTS
+DIRECTORY_CREATE_CONFLICT
+DIRECTORY_CREATE_FAILED
+PATH_ALREADY_EXISTS
+DESTINATION_ALREADY_EXISTS
+SYMLINK_UNSUPPORTED
+UNSUPPORTED_FILE_TYPE
+MOVE_DESTINATION_INSIDE_SOURCE
+MOVE_WORKSPACE_ROOT_DENIED
+MOVE_CONFLICT
+MOVE_FAILED
+DELETE_TARGET_CHANGED
+DIRECTORY_NOT_EMPTY
+DELETE_FAILED
+```
+
+workspace boundary、Protected / Sensitive、delete confirmation / denial 与 explicit task constraint仍是 Policy outcome，不伪装为 Tool operation failure。
+
+---
+
 ## 15. Whole-File Rewrite
 
 v1 不提供：
@@ -2079,6 +2138,8 @@ affected_paths
 
 必须足够支持 04 定义的 `WRITE_SCOPE` enforcement。
 
+`move_path` 的 `affected_paths` 同时包含 canonical source 与 destination。Lifecycle facts 另外保存最小 dynamic operation kind、source identity 与 directory non-empty observation，供 race check 与 03 Risk Permission 使用；它们不重复 `FILE_MUTATION` static capability。
+
 ---
 
 ### 18.3 Static Capability Is Not Repeated
@@ -2222,6 +2283,9 @@ ToolError.code = INTERNAL_TOOL_ERROR
 FILE_NOT_FOUND
 DIRECTORY_NOT_FOUND
 FILE_ALREADY_EXISTS
+DIRECTORY_ALREADY_EXISTS
+PATH_ALREADY_EXISTS
+DESTINATION_ALREADY_EXISTS
 PARENT_DIRECTORY_NOT_FOUND
 NOT_A_FILE
 NOT_A_DIRECTORY
@@ -2233,6 +2297,14 @@ TEXT_DECODING_FAILED
 FILE_READ_FAILED
 FILE_WRITE_FAILED
 DIRECTORY_LIST_FAILED
+SYMLINK_UNSUPPORTED
+UNSUPPORTED_FILE_TYPE
+MOVE_DESTINATION_INSIDE_SOURCE
+MOVE_CONFLICT
+MOVE_FAILED
+DELETE_TARGET_CHANGED
+DIRECTORY_NOT_EMPTY
+DELETE_FAILED
 ```
 
 ---
@@ -2432,22 +2504,21 @@ Registry 不变成 plugin manager。
 
 ## 24. Rejected Tools
 
-### 24.1 Dedicated Delete Tool
+### 24.1 Recursive or Bulk Delete Tool
 
 v1 不提供：
 
 ```text
-delete_file
-delete_directory
+recursive delete
+bulk / glob delete
+force delete
 ```
 
-主要原因：
+Lean `delete_path` 只删除一个普通文件或空目录，始终 CONFIRM；workspace root 与 non-empty directory DENY。仍拒绝更广 delete surface，主要原因：
 
-* 不属于 M1 核心 inspect-edit-verify flow；
-* 删除在 03 中默认需要 CONFIRM；
-* 可以避免第一版增加 destructive Tool surface。
-
-如后续加入，必须继续使用 03 的 Risk Permission。
+* 不建立 `rm -rf` 等价能力；
+* 不把确认扩展成 session-level 或 pattern-level authorization；
+* 不为 convenience 放宽 Protected / Sensitive / WRITE_SCOPE policy。
 
 ---
 
@@ -2597,29 +2668,35 @@ v1 Tool layer必须保持：
 18. `create_file` 为 create-only。
 19. `create_file` 不静默 overwrite existing file。
 20. `create_file` 不自动创建 parent directory tree。
-21. File mutation 尽可能避免 partial write。
-22. 普通 text edit 不应自动改变整个文件的 line-ending style。
-23. Shell 接收完整 command string。
-24. Shell cwd 必须位于 workspace 内。
-25. Shell cwd 不被描述为 filesystem sandbox。
-26. Shell stdin 为 noninteractive。
-27. Shell execution 必须有 timeout。
-28. Shell stdout / stderr 必须 bounded。
-29. Shell process 成功结束但 exit code 非零属于 `UNSUCCESSFUL_COMMAND`。
-30. Command timeout / process launch failure 属于 `OPERATION_FAILURE`。
-31. `ask_user` 是 InteractionTool。
-32. `ask_user` 在 validation 后离开 LOCAL pipeline。
-33. Permission Confirmation 不是 Tool。
-34. `PreparedToolCall` 是 immutable value object，不是 subsystem。
-35. Static operation category 由 ToolSpec capability 表达。
-36. Dynamic operation facts 不重复静态 Tool category。
-37. Expected preparation failure 使用现有 `OPERATION_FAILURE` taxonomy。
-38. Tool 不拥有 Agent retry。
-39. Tool 不拥有 batch semantics。
-40. Tool 不拥有 Context policy。
-41. Tool 不拥有 Runtime lifecycle。
-42. Tool 不自行扩大用户 Task Scope。
-43. Safety decision 始终由 Runtime / PolicyEngine 依据 03 contract 处理。
+21. `create_directory` 只创建一个目标层级且不 overwrite。
+22. `move_path` 对 source 与 destination 同时执行 containment、Protected / Sensitive 与 WRITE_SCOPE 检查。
+23. `move_path` destination 默认且固定不得存在，不提供 overwrite 参数。
+24. `delete_path` 只支持一个普通文件或空目录，始终 exact-action CONFIRM。
+25. `delete_path` 不提供 recursive / force / glob / batch 能力；workspace root 与 non-empty directory DENY。
+26. Lifecycle Tool 不通过 Shell 实现，也不隐式处理 VCS 语义。
+27. File mutation 尽可能避免 partial write。
+28. 普通 text edit 不应自动改变整个文件的 line-ending style。
+29. Shell 接收完整 command string。
+30. Shell cwd 必须位于 workspace 内。
+31. Shell cwd 不被描述为 filesystem sandbox。
+32. Shell stdin 为 noninteractive。
+33. Shell execution 必须有 timeout。
+34. Shell stdout / stderr 必须 bounded。
+35. Shell process 成功结束但 exit code 非零属于 `UNSUCCESSFUL_COMMAND`。
+36. Command timeout / process launch failure 属于 `OPERATION_FAILURE`。
+37. `ask_user` 是 InteractionTool。
+38. `ask_user` 在 validation 后离开 LOCAL pipeline。
+39. Permission Confirmation 不是 Tool。
+40. `PreparedToolCall` 是 immutable value object，不是 subsystem。
+41. Static operation category 由 ToolSpec capability 表达。
+42. Dynamic operation facts 不重复静态 Tool category。
+43. Expected preparation failure 使用现有 `OPERATION_FAILURE` taxonomy。
+44. Tool 不拥有 Agent retry。
+45. Tool 不拥有 batch semantics。
+46. Tool 不拥有 Context policy。
+47. Tool 不拥有 Runtime lifecycle。
+48. Tool 不自行扩大用户 Task Scope。
+49. Safety decision 始终由 Runtime / PolicyEngine 依据 03 contract 处理。
 
 ---
 
@@ -2663,6 +2740,12 @@ Final
 8. create_file
 
 9. ask_user
+
+10. create_directory
+
+11. move_path
+
+12. delete_path
 ```
 
 其中第一条最小 vertical slice 可以只有：
@@ -2716,7 +2799,7 @@ binary support
 advanced search ranking
 symbol index
 transactional multi-file edit
-directory mutation family
+recursive / bulk directory mutation framework
 parallel Tool execution
 background Tool execution
 language-specific Tool framework

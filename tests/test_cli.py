@@ -181,6 +181,9 @@ def test_composition_root_registers_complete_v1_toolset(tmp_path: Path) -> None:
         "search_text",
         "edit_file",
         "create_file",
+        "create_directory",
+        "move_path",
+        "delete_path",
         "shell",
         "ask_user",
     ]
