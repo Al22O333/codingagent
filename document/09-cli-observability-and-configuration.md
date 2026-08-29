@@ -1422,6 +1422,51 @@ formal separation服务于：
 
 ---
 
+### 42.1 Machine-Readable One-Shot
+
+CLI 支持：
+
+```text
+coding-agent --workspace <PATH> --json <one-shot task...>
+```
+
+`--json` 只适用于已有的 positional one-shot task；它不建立 JSON interactive Session、event stream 或 provider trace API。缺少 task 时在执行任何 Run 前返回 deterministic usage failure。
+
+在该模式中，stdout 必须恰好包含一个 newline-terminated valid JSON document。startup banner、progress、permission UI、Debug diagnostics 和其他 human presentation 不得混入 stdout；必要的 interactive prompt 或 diagnostic 可以使用 stderr。JSON 不含 Markdown、raw provider response、完整 Tool history、content-bearing Tool arguments 或 Runtime Secret。
+
+schema version 1 固定包含：
+
+```text
+schema_version
+lifecycle_state
+final_response
+terminal_reason
+normalized_error
+model_turns
+tool_attempts
+limit_reached
+```
+
+其中：
+
+* `lifecycle_state` 是 `COMPLETED` / `FAILED` / `CANCELLED`；Run 建立前的 startup / usage failure 使用 `STARTUP_FAILED`；
+* `final_response` 只在 Runtime 产生真实 Final 时为 string，并完整保留（Runtime Secret redaction 优先）；
+* `terminal_reason` 保存 normalized terminal code，正常 `COMPLETED` 为 `null`；
+* `normalized_error` 只提供 bounded `{code, message}`，不序列化 exception、traceback 或 provider payload；
+* counters 直接来自 terminal `AgentRun`，startup failure 为 `0`；
+* provider usage 只有在现有 Runtime 已提供可信 normalized aggregate 时才允许新增 optional versioned field；首版不为此修改 Provider / Runtime protocol。
+
+不得增加模糊的业务字段：
+
+```text
+success: true
+task_succeeded: true
+```
+
+因为 `COMPLETED` 只表示 Runtime 得到合规 Final，不证明模型的业务结论正确。process exit code 只表达 CLI / Runtime lifecycle：`0` = COMPLETED，`1` = FAILED，`130` = CANCELLED，`2` = startup / usage failure。
+
+---
+
 ## Interactive CLI and Session Control
 
 ### 43. Interactive Session Model
@@ -1692,6 +1737,9 @@ CLI展示 failure reason后：
 27. Optional observability callback是synchronous、read-only且control-flow independent；callback failure不得成为Agent control-flow failure。
 28. Candidate Final 不进入 Normal output；eligible Run 进入 self-audit 时 Normal 最多显示一次轻量检查提示，真正 Final 只展示一次。
 29. Debug completion-audit events 必须 bounded、Secret-safe，不打印完整 Candidate，并且不能改变 Runtime control flow。
+30. `--json` 只支持 one-shot；stdout 恰好一个稳定 JSON document，human/debug surface 与 prompt 使用 stderr。
+31. machine-readable output 只报告 lifecycle facts，不把 `COMPLETED` 伪装成 semantic task success。
+32. machine-readable error bounded、normalized、Secret-safe，不包含 raw exception、provider payload或完整 Tool history。
 
 ---
 
@@ -1807,6 +1855,7 @@ LoggingConfig hierarchy
 * `/exit` / `/quit`；
 * active-Run Ctrl+C cancellation with Session recovery；
 * `FAILED` / `CANCELLED` 后 subsequent same-Session Run；
+* `--json` one-shot valid document、stdout isolation、stable lifecycle schema、exit codes、startup failure 和 Secret redaction；
 * corresponding configuration、observability 与 CLI tests。
 
 架构文档可以暂时领先实现，但最终提交前上述 09 normative contracts 必须具有对应 code 与 evidence。本文不修改 implementation plan，也不记录易 stale 的当前实现 snapshot table。
@@ -1828,6 +1877,7 @@ LoggingConfig hierarchy
 * `/exit` / EOF / empty input；
 * Ctrl+C Run cancellation；
 * FAILED / CANCELLED 后 same-Session next Run；
+* JSON COMPLETED / FAILED / CANCELLED / STARTUP_FAILED projections；
 * no automatic persistent log。
 
 最终提交前还应使用 representative real coding tasks 做一次 operational tuning check，确认默认 `max_context_chars = 80_000` 不会造成过度 destructive eviction 或反复读取相同材料。若 evidence 表明确有必要，可在现有 validated public range `8_000..256_000` 内调整 concrete default，而不改变 07 的 Context architecture。该检查不是 runtime contract，不要求固定 benchmark 数量，也不要求建立 tuner 或 benchmark framework。

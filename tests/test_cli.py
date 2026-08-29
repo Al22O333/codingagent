@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import shlex
 import subprocess
 import sys
@@ -421,6 +422,180 @@ def test_one_shot_main_starts_runtime_and_prints_final(
     assert "◆ 运行结束" in output
     assert "Finished from CLI." in output
     assert fake.requests[0].messages[1].text == "inspect the project"  # type: ignore[union-attr]
+
+
+def test_json_one_shot_emits_one_stable_document_without_success_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _configure_main_environment(monkeypatch)
+    fake = FakeModelClient([ModelResponse(text="Could not prove the task.\n第二行")])
+    monkeypatch.setattr(cli, "OpenAICompatibleModelClient", lambda config: fake)
+
+    exit_code = cli.main(
+        ["--workspace", str(tmp_path), "--json", "inspect", "the", "project"]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out.count("\n") == 1
+    document = json.loads(captured.out)
+    assert list(document) == [
+        "schema_version",
+        "lifecycle_state",
+        "final_response",
+        "terminal_reason",
+        "normalized_error",
+        "model_turns",
+        "tool_attempts",
+        "limit_reached",
+    ]
+    assert document == {
+        "schema_version": 1,
+        "lifecycle_state": "COMPLETED",
+        "final_response": "Could not prove the task.\n第二行",
+        "terminal_reason": None,
+        "normalized_error": None,
+        "model_turns": 1,
+        "tool_attempts": 0,
+        "limit_reached": None,
+    }
+    assert "success" not in document
+    assert cli.STARTUP_MESSAGE not in captured.out
+    assert "正在运行" not in captured.out
+
+
+def test_json_one_shot_failure_is_normalized_and_redacts_runtime_secret(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secret = "json-provider-secret"
+    _configure_main_environment(monkeypatch)
+    monkeypatch.setenv("CODING_AGENT_API_KEY", secret)
+    fake = FakeModelClient([FatalProviderError(f"invalid key: {secret}")])
+    monkeypatch.setattr(cli, "OpenAICompatibleModelClient", lambda config: fake)
+
+    exit_code = cli.main(["--workspace", str(tmp_path), "--json", "inspect"])
+
+    captured = capsys.readouterr()
+    document = json.loads(captured.out)
+    assert exit_code == 1
+    assert document["lifecycle_state"] == "FAILED"
+    assert document["terminal_reason"] == "PROVIDER_FAILURE"
+    assert document["normalized_error"] == {
+        "code": "PROVIDER_FAILURE",
+        "message": "模型服务请求失败，请检查凭据、服务地址或稍后重试。",
+    }
+    assert document["final_response"] is None
+    assert secret not in captured.out
+    assert secret not in captured.err
+    assert "invalid key" not in captured.out
+    assert "Traceback" not in captured.out
+
+
+def test_json_one_shot_redacts_secret_from_otherwise_complete_final(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secret = "json-final-secret"
+    _configure_main_environment(monkeypatch)
+    monkeypatch.setenv("CODING_AGENT_API_KEY", secret)
+    fake = FakeModelClient([ModelResponse(text=f"Result: {secret}")])
+    monkeypatch.setattr(cli, "OpenAICompatibleModelClient", lambda config: fake)
+
+    exit_code = cli.main(["--workspace", str(tmp_path), "--json", "inspect"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert json.loads(captured.out)["final_response"] == "Result: <redacted>"
+    assert secret not in captured.out
+    assert secret not in captured.err
+
+
+def test_json_mode_routes_permission_ui_to_stderr_and_keeps_stdout_parseable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _configure_main_environment(monkeypatch)
+    (tmp_path / ".env").write_text("TOKEN=value\n", encoding="utf-8")
+    fake = FakeModelClient(
+        [
+            ModelResponse(
+                text=None,
+                tool_calls=(ToolCall("read", "read_file", {"path": ".env"}),)
+            ),
+            ModelResponse(text="The read was rejected."),
+        ]
+    )
+    monkeypatch.setattr(cli, "OpenAICompatibleModelClient", lambda config: fake)
+    monkeypatch.setattr(sys, "stdin", StringIO("n\n"))
+
+    exit_code = cli.main(["--workspace", str(tmp_path), "--json", "inspect"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    document = json.loads(captured.out)
+    assert document["final_response"] == "The read was rejected."
+    assert captured.out.count("\n") == 1
+    assert "需要确认" not in captured.out
+    assert "需要确认" in captured.err
+
+
+def test_json_cancellation_has_lifecycle_exit_code_without_error_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _configure_main_environment(monkeypatch)
+
+    class InterruptingClient:
+        def complete(self, request: ModelRequest) -> ModelResponse:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        cli, "OpenAICompatibleModelClient", lambda config: InterruptingClient()
+    )
+
+    exit_code = cli.main(["--workspace", str(tmp_path), "--json", "inspect"])
+
+    document = json.loads(capsys.readouterr().out)
+    assert exit_code == 130
+    assert document["lifecycle_state"] == "CANCELLED"
+    assert document["terminal_reason"] == "USER_CANCELLATION"
+    assert document["normalized_error"] is None
+    assert document["final_response"] is None
+
+
+def test_json_startup_and_missing_task_failures_remain_machine_readable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _configure_main_environment(monkeypatch)
+
+    missing_task_exit = cli.main(["--workspace", str(tmp_path), "--json"])
+    missing_task = json.loads(capsys.readouterr().out)
+
+    assert missing_task_exit == 2
+    assert missing_task["lifecycle_state"] == "STARTUP_FAILED"
+    assert missing_task["normalized_error"]["code"] == "JSON_ONE_SHOT_REQUIRED"
+    assert missing_task["model_turns"] == 0
+
+    missing_workspace_exit = cli.main(
+        ["--workspace", str(tmp_path / "missing"), "--json", "inspect"]
+    )
+    missing_workspace_capture = capsys.readouterr()
+    missing_workspace = json.loads(missing_workspace_capture.out)
+
+    assert missing_workspace_exit == 2
+    assert missing_workspace["lifecycle_state"] == "STARTUP_FAILED"
+    assert missing_workspace["terminal_reason"] == "STARTUP_FAILURE"
+    assert missing_workspace["normalized_error"]["code"] == "STARTUP_FAILURE"
+    assert "Traceback" not in missing_workspace_capture.out
 
 
 def test_invalid_workspace_fails_startup_before_model_client_construction(

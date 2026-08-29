@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shlex
@@ -32,6 +33,7 @@ from .policy import PolicyEngine
 from .project_instructions import RootProjectInstructions
 from .read_file import ReadFileTool
 from .runtime import (
+    AgentRun,
     AgentRuntime,
     RuntimeEvent,
     RunState,
@@ -602,6 +604,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-context-chars", type=int)
     parser.add_argument("--debug", action="store_true", default=None)
     parser.add_argument(
+        "--json",
+        action="store_true",
+        help="emit one machine-readable document for a one-shot task",
+    )
+    parser.add_argument(
         "task",
         nargs="*",
         help="optional one-shot task; omit for an interactive Session",
@@ -612,6 +619,20 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     """Run one task or a minimal multi-Run interactive Session."""
     args = _parser().parse_args(argv)
+    startup_secret_values = tuple(
+        value
+        for name in _DEFAULT_SECRET_ENVIRONMENT_NAMES
+        if (value := os.environ.get(name))
+    )
+    if args.json and not args.task:
+        _write_json_document(
+            _startup_failure_document(
+                "JSON_ONE_SHOT_REQUIRED",
+                "--json requires a one-shot task",
+            ),
+            sys.stdout,
+        )
+        return 2
     try:
         config = load_config(
             args.workspace,
@@ -623,10 +644,31 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_context_chars=args.max_context_chars,
             debug=args.debug,
         )
-        runtime = build_runtime(config, stdout=sys.stdout)
+        runtime = build_runtime(
+            config,
+            stdout=sys.stderr if args.json else sys.stdout,
+        )
     except (OSError, ValueError) as error:
+        if args.json:
+            message = _redact_values(str(error), startup_secret_values)
+            _write_json_document(
+                _startup_failure_document("STARTUP_FAILURE", message),
+                sys.stdout,
+            )
+            return 2
         print(f"启动失败：{error}", file=sys.stderr)
         return 2
+
+    if args.json:
+        run = runtime.run(" ".join(args.task))
+        _write_json_document(
+            _run_json_document(
+                run,
+                secret_values=(config.api_key, *startup_secret_values),
+            ),
+            sys.stdout,
+        )
+        return _run_exit_code(run)
 
     print(STARTUP_MESSAGE)
     print(f"{_UI_TEXT['workspace']}  {config.workspace.resolve(strict=True)}")
@@ -662,6 +704,88 @@ def _run_task(runtime: AgentRuntime, task: str, stdout: TextIO) -> int:
     stdout.write(f"\n{_DIVIDER}\n✗ 本次运行失败\n{_DIVIDER}\n\n")
     stdout.write("原因：" + _failure_message(run.termination_reason, run.limit_reached) + "\n")
     return 1
+
+
+def _run_json_document(
+    run: AgentRun,
+    *,
+    secret_values: tuple[str, ...],
+) -> dict[str, object]:
+    """Project one terminal Run into the stable machine-readable schema."""
+
+    final_response = (
+        _redact_values(run.final_response, secret_values)
+        if run.final_response is not None
+        else None
+    )
+    normalized_error: dict[str, str] | None = None
+    if run.state is RunState.FAILED:
+        code = (
+            run.termination_reason.value
+            if run.termination_reason is not None
+            else TerminationReason.RUNTIME_FAILURE.value
+        )
+        normalized_error = {
+            "code": code,
+            "message": _bounded_head_tail(
+                _failure_message(run.termination_reason, run.limit_reached),
+                1_000,
+            ),
+        }
+    return {
+        "schema_version": 1,
+        "lifecycle_state": run.state.value,
+        "final_response": final_response,
+        "terminal_reason": (
+            run.termination_reason.value
+            if run.termination_reason is not None
+            else None
+        ),
+        "normalized_error": normalized_error,
+        "model_turns": run.model_turns,
+        "tool_attempts": run.tool_call_attempts,
+        "limit_reached": run.limit_reached,
+    }
+
+
+def _startup_failure_document(code: str, message: str) -> dict[str, object]:
+    """Return the no-Run form of the versioned JSON result schema."""
+
+    return {
+        "schema_version": 1,
+        "lifecycle_state": "STARTUP_FAILED",
+        "final_response": None,
+        "terminal_reason": "STARTUP_FAILURE",
+        "normalized_error": {
+            "code": code,
+            "message": _bounded_head_tail(_single_line(message), 1_000),
+        },
+        "model_turns": 0,
+        "tool_attempts": 0,
+        "limit_reached": None,
+    }
+
+
+def _write_json_document(document: Mapping[str, object], stdout: TextIO) -> None:
+    json.dump(document, stdout, ensure_ascii=False, separators=(",", ":"))
+    stdout.write("\n")
+    stdout.flush()
+
+
+def _run_exit_code(run: AgentRun) -> int:
+    if run.state is RunState.COMPLETED:
+        return 0
+    if run.state is RunState.CANCELLED:
+        return 130
+    return 1
+
+
+def _redact_values(value: str, secret_values: tuple[str, ...]) -> str:
+    redacted = value
+    for secret in secret_values:
+        if secret:
+            redacted = redacted.replace(secret, "<redacted>")
+    return redacted
 
 
 def _failure_message(
