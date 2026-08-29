@@ -215,6 +215,8 @@ validate checkpoint + workspace identity
 
 Historical continuity 始终可能 stale。它不能创建当前 Run hard constraints，不能证明当前 Workspace State，也不能阻止模型按需重新读取文件和运行验证。
 
+Session listing 与 deletion 是 composition-root management operations，不是 Agent Run。它们不得构造 ModelClient、改变 Runtime lifecycle 或读取 continuity content；listing 只暴露当前 canonical workspace 下的 ID、更新时间与 retained completed-run count，deletion 只接受 exact canonical UUID 并再次验证 workspace binding。
+
 ---
 
 ## 5. Agent Execution Model

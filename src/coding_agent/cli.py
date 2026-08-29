@@ -9,10 +9,15 @@ import re
 import shlex
 import sys
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 from typing import TextIO
 
 from .ask_user import AskUserTool
-from .config import AgentConfig, load_agent_config
+from .config import (
+    AgentConfig,
+    load_agent_config,
+    session_directory_from_environment,
+)
 from .context import CompletedRunContinuity, ContextManager
 from .create_file import CreateFileTool
 from .discovery import ListDirectoryTool, SearchFilesTool
@@ -659,6 +664,16 @@ def _parser() -> argparse.ArgumentParser:
         metavar="SESSION_UUID",
         help="resume one exact terminal-safe persisted session",
     )
+    persistence.add_argument(
+        "--list-sessions",
+        action="store_true",
+        help="list persisted sessions for the selected workspace",
+    )
+    persistence.add_argument(
+        "--delete-session",
+        metavar="SESSION_UUID",
+        help="delete one exact persisted session for the selected workspace",
+    )
     parser.add_argument(
         "task",
         nargs="*",
@@ -675,6 +690,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         for name in _DEFAULT_SECRET_ENVIRONMENT_NAMES
         if (value := os.environ.get(name))
     )
+    session_management = args.list_sessions or args.delete_session is not None
+    if session_management:
+        if args.task or args.non_interactive:
+            code = "SESSION_MANAGEMENT_ARGUMENT_CONFLICT"
+            message = "session management does not accept a task or --non-interactive"
+            if args.json:
+                _write_json_document(
+                    _startup_failure_document(code, message),
+                    sys.stdout,
+                )
+            else:
+                print(f"启动失败：{message}", file=sys.stderr)
+            return 2
+        return _run_session_management(
+            workspace=Path(args.workspace),
+            list_sessions=args.list_sessions,
+            delete_session=args.delete_session,
+            json_output=args.json,
+            secret_values=startup_secret_values,
+        )
     if (args.json or args.non_interactive) and not args.task:
         code = (
             "NON_INTERACTIVE_ONE_SHOT_REQUIRED"
@@ -799,6 +834,83 @@ def main(argv: Sequence[str] | None = None) -> int:
             config=config,
             secret_values=(config.api_key, *startup_secret_values),
         )
+
+
+def _run_session_management(
+    *,
+    workspace: Path,
+    list_sessions: bool,
+    delete_session: str | None,
+    json_output: bool,
+    secret_values: tuple[str, ...],
+) -> int:
+    """Execute one model-free Session management operation."""
+
+    try:
+        store = SessionStore(session_directory_from_environment())
+        if list_sessions:
+            listing = store.list_summaries(workspace)
+            if json_output:
+                _write_json_document(
+                    {
+                        "schema_version": 1,
+                        "operation": "list_sessions",
+                        "workspace_identity": listing.workspace_identity,
+                        "sessions": [
+                            {
+                                "session_id": summary.session_id,
+                                "updated_at": summary.updated_at,
+                                "completed_run_count": summary.completed_run_count,
+                            }
+                            for summary in listing.sessions
+                        ],
+                        "skipped_invalid_entries": listing.skipped_invalid_entries,
+                    },
+                    sys.stdout,
+                )
+            else:
+                if listing.sessions:
+                    print("Persisted sessions:")
+                    for summary in listing.sessions:
+                        print(
+                            f"{summary.session_id}  {summary.updated_at}  "
+                            f"completed_runs={summary.completed_run_count}"
+                        )
+                else:
+                    print("No persisted sessions for this workspace.")
+                if listing.skipped_invalid_entries:
+                    print(
+                        "Skipped invalid session entries: "
+                        f"{listing.skipped_invalid_entries}"
+                    )
+            return 0
+
+        assert delete_session is not None
+        checkpoint = store.delete(delete_session, workspace)
+        if json_output:
+            _write_json_document(
+                {
+                    "schema_version": 1,
+                    "operation": "delete_session",
+                    "session_id": checkpoint.session_id,
+                    "deleted": True,
+                },
+                sys.stdout,
+            )
+        else:
+            print(f"Deleted session {checkpoint.session_id}")
+        return 0
+    except (OSError, ValueError, SessionStoreError) as error:
+        code = error.code if isinstance(error, SessionStoreError) else "STARTUP_FAILURE"
+        message = _redact_values(str(error), secret_values)
+        if json_output:
+            _write_json_document(
+                _startup_failure_document(code, message),
+                sys.stdout,
+            )
+        else:
+            print(f"启动失败：{message}", file=sys.stderr)
+        return 2
 
 
 def _run_task(

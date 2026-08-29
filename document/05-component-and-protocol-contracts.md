@@ -330,7 +330,9 @@ CLI rendering
 
 `SessionStore` 是 composition-root 使用的 Lean terminal-safe persistence boundary。它只序列化 07 定义的 immutable completed-run continuity records 与最小 session metadata；它不参与 Agent loop、Run lifecycle、Context eviction、Policy 或 Tool dispatch。
 
-它必须提供 deterministic load/save failure codes，验证 canonical session ID、schema version 和 workspace identity，并以 sibling temporary file + atomic replace 更新单个 session document。它不得解释对话语义、扫描 Workspace、序列化 ContextManager 内部状态，或持有 mutable `AgentRun`。
+它必须提供 deterministic load/save/list/delete failure codes，验证 canonical session ID、schema version 和 workspace identity，并以 sibling temporary file + atomic replace 更新单个 session document。List 只返回 current-workspace metadata summaries，不返回 continuity；其他 workspace 的合法 documents 不可见，损坏或 symbolic-link entries 只形成 anonymous skipped count。Delete 必须在 unlink 前完成 exact ID、regular-file 与 workspace 验证，且只删除单个 checkpoint。
+
+List/delete 是 model-free composition-root operations，不要求 provider model、base URL 或 API key，也不得构造 `ModelClient`。它们不得解释对话语义、扫描 Workspace、序列化 ContextManager 内部状态，或持有 mutable `AgentRun`。
 
 `ContextManager` 只暴露 bounded completed-run continuity 的 typed import/export；只有在没有 active Run 时才允许 restore。`AgentRuntime` resume 后仍拥有一个全新的 `Session` 和全新的 Runs。
 

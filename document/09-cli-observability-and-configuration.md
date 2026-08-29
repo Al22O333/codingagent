@@ -1501,20 +1501,26 @@ Interactive mode、无 `--non-interactive` 的 `--json` mode以及 ConsoleUserIn
 
 ### 42.3 Explicit Persistent Session CLI
 
-CLI 提供两个显式入口：
+CLI 提供四个显式入口：
 
 ```text
 coding-agent --workspace <PATH> --persist-session <task...>
 coding-agent --workspace <PATH> --resume <SESSION_UUID> <follow-up task...>
+coding-agent --workspace <PATH> --list-sessions
+coding-agent --workspace <PATH> --delete-session <SESSION_UUID>
 ```
 
-两者也可省略 one-shot task而进入现有 interactive loop。`--persist-session` 创建新的 UUID session；`--resume` 只加载 exact canonical UUID，不创建 missing session。两者互斥。默认 CLI 行为不写 session checkpoint。
+前两个入口也可省略 one-shot task而进入现有 interactive loop。`--persist-session` 创建新的 UUID session；`--resume` 只加载 exact canonical UUID，不创建 missing session。四者互斥。默认 CLI 行为不写 session checkpoint。
 
 Session documents 存在用户级 session directory；测试或受控 automation 可以通过 `CODING_AGENT_SESSION_DIR` 选择独立目录。每个 document 使用 schema version 1，包含 exact session ID、canonical workspace identity、last-completed timestamp 和 bounded completed-run task/final pairs。Missing、corrupt、unknown version、invalid ID 和 wrong workspace 都在 ModelClient construction / Run start 前作为 deterministic startup failure 返回。
 
 每个 `COMPLETED` Run 结束并清理 pending state后原子更新 checkpoint。`FAILED` / `CANCELLED` Run 不更新 checkpoint。写入使用同目录 exclusive temporary file + atomic replace；失败时保留旧 checkpoint并产生独立、Secret-safe persistence error。恢复不会复用旧 project instructions、dirty-workspace snapshot、hard constraints、Runtime counters或 pending state。
 
 Human mode 显示 bounded session ID。`--json` 与 persistence/resume组合时保留现有 schema version和字段，并额外包含 `session_id`、`session_checkpoint_updated` 与 nullable bounded `session_error`；未请求 persistence 时现有 JSON document shape不变。
+
+`--list-sessions` 与 `--delete-session` 是 model-free management operations：不接受 positional task或 `--non-interactive`，不进入 interactive loop，不需要 provider credentials，也不构造 ModelClient。List 只显示绑定当前 canonical workspace 的 session ID、validated UTC update time与 completed-run count；不显示 task/final continuity或其他 workspace sessions。损坏、不可读或 symbolic-link documents 只贡献 anonymous `skipped_invalid_entries` count。Delete 要求 exact canonical UUID，验证 document、regular file与 workspace binding后只 unlink该 checkpoint；missing与 wrong-workspace均 deterministic failure。
+
+Management JSON 是独立 schema-versioned document。List 返回 `operation=list_sessions`、`workspace_identity`、metadata-only `sessions` array与 `skipped_invalid_entries`；delete返回 `operation=delete_session`、exact `session_id`与 `deleted=true`。管理失败沿用 no-Run startup failure document且 process exit code为 `2`。
 
 ---
 

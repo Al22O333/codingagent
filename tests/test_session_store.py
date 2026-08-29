@@ -165,6 +165,100 @@ def test_atomic_replace_failure_preserves_previous_checkpoint_and_cleans_temp(
     assert list(root.glob(".*.tmp")) == []
 
 
+def test_listing_is_workspace_scoped_metadata_only_and_tolerates_bad_entries(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    other_workspace = tmp_path / "other-workspace"
+    workspace.mkdir()
+    other_workspace.mkdir()
+    root = tmp_path / "sessions"
+    store = SessionStore(root)
+    first_id = str(uuid4())
+    second_id = str(uuid4())
+    other_id = str(uuid4())
+    store.save(
+        session_id=first_id,
+        workspace=workspace,
+        continuity=(_record("private task", "private final"),),
+    )
+    store.save(
+        session_id=second_id,
+        workspace=workspace,
+        continuity=(),
+    )
+    store.save(
+        session_id=other_id,
+        workspace=other_workspace,
+        continuity=(_record(),),
+    )
+    corrupt_id = str(uuid4())
+    (root / f"{corrupt_id}.json").write_text("not-json", encoding="utf-8")
+    (root / "notes.json").write_text("not a session", encoding="utf-8")
+
+    listing = store.list_summaries(workspace)
+
+    assert {summary.session_id for summary in listing.sessions} == {
+        first_id,
+        second_id,
+    }
+    assert [summary.updated_at for summary in listing.sessions] == sorted(
+        (summary.updated_at for summary in listing.sessions), reverse=True
+    )
+    assert {summary.completed_run_count for summary in listing.sessions} == {0, 1}
+    assert all(not hasattr(summary, "continuity") for summary in listing.sessions)
+    assert other_id not in repr(listing)
+    assert "private task" not in repr(listing)
+    assert listing.skipped_invalid_entries == 1
+
+
+def test_listing_missing_directory_is_empty_and_invalid_directory_is_rejected(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    root = tmp_path / "sessions"
+
+    listing = SessionStore(root).list_summaries(workspace)
+
+    assert listing.sessions == ()
+    assert listing.skipped_invalid_entries == 0
+
+    root.write_text("not a directory", encoding="utf-8")
+    with pytest.raises(SessionStoreError) as raised:
+        SessionStore(root).list_summaries(workspace)
+    assert raised.value.code == "SESSION_LIST_FAILED"
+
+
+def test_delete_requires_exact_id_and_matching_workspace(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    other_workspace = tmp_path / "other-workspace"
+    workspace.mkdir()
+    other_workspace.mkdir()
+    root = tmp_path / "sessions"
+    session_id = str(uuid4())
+    store = SessionStore(root)
+    store.save(
+        session_id=session_id,
+        workspace=workspace,
+        continuity=(_record(),),
+    )
+    target = root / f"{session_id}.json"
+
+    with pytest.raises(SessionStoreError) as mismatch:
+        store.delete(session_id, other_workspace)
+    assert mismatch.value.code == "SESSION_WORKSPACE_MISMATCH"
+    assert target.is_file()
+
+    deleted = store.delete(session_id, workspace)
+    assert deleted.session_id == session_id
+    assert not target.exists()
+
+    with pytest.raises(SessionStoreError) as missing:
+        store.delete(session_id, workspace)
+    assert missing.value.code == "SESSION_NOT_FOUND"
+
+
 def test_session_file_symlink_is_never_followed(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -187,4 +281,7 @@ def test_session_file_symlink_is_never_followed(tmp_path: Path) -> None:
         )
 
     assert raised.value.code == "SESSION_INVALID_FILE"
+    with pytest.raises(SessionStoreError) as delete_raised:
+        SessionStore(root).delete(session_id, workspace)
+    assert delete_raised.value.code == "SESSION_INVALID_FILE"
     assert outside.read_text(encoding="utf-8") == "sentinel"

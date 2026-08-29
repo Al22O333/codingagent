@@ -39,6 +39,24 @@ class SessionCheckpoint:
     continuity: tuple[CompletedRunContinuity, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class SessionSummary:
+    """Non-sensitive metadata for one workspace-bound checkpoint."""
+
+    session_id: str
+    updated_at: str
+    completed_run_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class SessionListing:
+    """Deterministic current-workspace listing plus anonymous diagnostics."""
+
+    workspace_identity: str
+    sessions: tuple[SessionSummary, ...]
+    skipped_invalid_entries: int
+
+
 class SessionStore:
     """Store exact UUID-addressed JSON documents with atomic replacement."""
 
@@ -144,6 +162,73 @@ class SessionStore:
             ) from error
         return checkpoint
 
+    def list_summaries(self, workspace: Path) -> SessionListing:
+        """List valid checkpoints for one workspace without exposing continuity."""
+
+        workspace_identity = canonical_workspace_identity(workspace)
+        if not self._root.exists():
+            return SessionListing(workspace_identity, (), 0)
+        if not self._root.is_dir():
+            raise SessionStoreError(
+                "SESSION_LIST_FAILED", "session directory is not a directory"
+            )
+        try:
+            candidates = sorted(self._root.iterdir(), key=lambda path: path.name)
+        except OSError as error:
+            raise SessionStoreError(
+                "SESSION_LIST_FAILED", "session directory could not be read"
+            ) from error
+
+        summaries: list[SessionSummary] = []
+        skipped_invalid_entries = 0
+        for candidate in candidates:
+            if candidate.suffix != ".json":
+                continue
+            candidate_id = candidate.stem
+            try:
+                canonical_session_id(candidate_id)
+            except SessionStoreError:
+                continue
+            try:
+                checkpoint = self.load(candidate_id, workspace)
+            except SessionStoreError as error:
+                if error.code == "SESSION_WORKSPACE_MISMATCH":
+                    continue
+                skipped_invalid_entries += 1
+                continue
+            summaries.append(
+                SessionSummary(
+                    session_id=checkpoint.session_id,
+                    updated_at=checkpoint.updated_at,
+                    completed_run_count=len(checkpoint.continuity),
+                )
+            )
+        summaries.sort(
+            key=lambda summary: (summary.updated_at, summary.session_id), reverse=True
+        )
+        return SessionListing(
+            workspace_identity,
+            tuple(summaries),
+            skipped_invalid_entries,
+        )
+
+    def delete(self, session_id: str, workspace: Path) -> SessionCheckpoint:
+        """Delete one exact validated checkpoint bound to the given workspace."""
+
+        checkpoint = self.load(session_id, workspace)
+        target = self._root / f"{checkpoint.session_id}.json"
+        if target.is_symlink() or not target.is_file():
+            raise SessionStoreError(
+                "SESSION_INVALID_FILE", "session path is not a regular file"
+            )
+        try:
+            target.unlink()
+        except OSError as error:
+            raise SessionStoreError(
+                "SESSION_DELETE_FAILED", "session checkpoint could not be deleted"
+            ) from error
+        return checkpoint
+
 
 def canonical_session_id(value: str) -> str:
     """Return one canonical UUID or reject path-like and ambiguous identifiers."""
@@ -200,8 +285,20 @@ def _parse_checkpoint(
             "session belongs to a different workspace",
         )
     updated_at = document.get("updated_at")
-    if not isinstance(updated_at, str) or not updated_at:
+    if (
+        not isinstance(updated_at, str)
+        or not updated_at.endswith("Z")
+        or len(updated_at) > 64
+    ):
         _corrupt("session timestamp is missing")
+    try:
+        parsed_updated_at = datetime.fromisoformat(
+            updated_at.removesuffix("Z") + "+00:00"
+        )
+    except ValueError:
+        _corrupt("session timestamp is invalid")
+    if parsed_updated_at.utcoffset() != timezone.utc.utcoffset(parsed_updated_at):
+        _corrupt("session timestamp is invalid")
     raw_runs = document.get("completed_runs")
     if not isinstance(raw_runs, list) or len(raw_runs) > MAX_RETAINED_COMPLETED_RUNS:
         _corrupt("completed continuity is invalid")
@@ -260,8 +357,10 @@ __all__ = [
     "MAX_SESSION_DOCUMENT_BYTES",
     "SESSION_SCHEMA_VERSION",
     "SessionCheckpoint",
+    "SessionListing",
     "SessionStore",
     "SessionStoreError",
+    "SessionSummary",
     "canonical_session_id",
     "canonical_workspace_identity",
 ]

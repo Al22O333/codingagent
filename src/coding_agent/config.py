@@ -119,7 +119,7 @@ def load_agent_config(
             DEFAULT_MAX_CONTEXT_CHARS,
         ),
         debug=debug if debug is not None else _environment_bool(values, "CODING_AGENT_DEBUG"),
-        session_directory=_session_directory(values),
+        session_directory=session_directory_from_environment(values),
     )
 
 
@@ -157,7 +157,12 @@ def _environment_bool(values: Mapping[str, str], name: str) -> bool:
     raise ValueError(f"{name} must be a boolean")
 
 
-def _session_directory(values: Mapping[str, str]) -> Path:
+def session_directory_from_environment(
+    environ: Mapping[str, str] | None = None,
+) -> Path:
+    """Resolve the user-level Session directory without loading model config."""
+
+    values = os.environ if environ is None else environ
     raw = values.get("CODING_AGENT_SESSION_DIR")
     if raw is None or not raw.strip():
         return Path.home() / ".coding-agent" / "sessions"
@@ -173,4 +178,8 @@ def _validate_range(name: str, value: int, limits: tuple[int, int]) -> None:
         raise ValueError(f"{name} must be between {lower} and {upper}")
 
 
-__all__ = ["AgentConfig", "load_agent_config"]
+__all__ = [
+    "AgentConfig",
+    "load_agent_config",
+    "session_directory_from_environment",
+]

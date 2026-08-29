@@ -15,6 +15,7 @@ import pytest
 
 from coding_agent import cli
 from coding_agent.cli import CLIConfig, ConsoleUserInteraction, build_runtime, load_config
+from coding_agent.context import CompletedRunContinuity
 from coding_agent.interaction import (
     ClarificationRequest,
     ClarificationStatus,
@@ -34,6 +35,7 @@ from coding_agent.protocol import (
     ToolOutcome,
 )
 from coding_agent.runtime import RunState, RuntimeEvent
+from coding_agent.session_store import SessionStore
 
 
 def _config(workspace: Path) -> CLIConfig:
@@ -736,6 +738,155 @@ def test_persisted_checkpoint_redacts_runtime_secret_and_resume_errors_before_mo
     assert missing_exit == 2
     assert missing_document["normalized_error"]["code"] == "SESSION_NOT_FOUND"
     assert constructed is False
+
+
+def test_session_list_is_model_free_workspace_scoped_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workspace = tmp_path / "workspace"
+    other_workspace = tmp_path / "other-workspace"
+    workspace.mkdir()
+    other_workspace.mkdir()
+    session_directory = tmp_path / "session-store"
+    session_id = "10000000-0000-4000-8000-000000000001"
+    other_id = "20000000-0000-4000-8000-000000000002"
+    store = SessionStore(session_directory)
+    store.save(
+        session_id=session_id,
+        workspace=workspace,
+        continuity=(CompletedRunContinuity("private task", "private final"),),
+    )
+    store.save(
+        session_id=other_id,
+        workspace=other_workspace,
+        continuity=(CompletedRunContinuity("other task", "other final"),),
+    )
+    monkeypatch.setenv("CODING_AGENT_SESSION_DIR", str(session_directory))
+    for name in (
+        "CODING_AGENT_MODEL",
+        "CODING_AGENT_BASE_URL",
+        "CODING_AGENT_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    def must_not_construct(config):  # type: ignore[no-untyped-def]
+        raise AssertionError("model client constructed during session listing")
+
+    monkeypatch.setattr(cli, "OpenAICompatibleModelClient", must_not_construct)
+
+    exit_code = cli.main(
+        ["--workspace", str(workspace), "--json", "--list-sessions"]
+    )
+    captured = capsys.readouterr()
+    document = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert captured.err == ""
+    assert captured.out.count("\n") == 1
+    assert document == {
+        "schema_version": 1,
+        "operation": "list_sessions",
+        "workspace_identity": os.path.normcase(str(workspace.resolve())),
+        "sessions": [
+            {
+                "session_id": session_id,
+                "updated_at": document["sessions"][0]["updated_at"],
+                "completed_run_count": 1,
+            }
+        ],
+        "skipped_invalid_entries": 0,
+    }
+    assert "private task" not in captured.out
+    assert other_id not in captured.out
+
+
+def test_session_delete_is_exact_model_free_and_missing_is_deterministic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    session_directory = tmp_path / "session-store"
+    session_id = "30000000-0000-4000-8000-000000000003"
+    SessionStore(session_directory).save(
+        session_id=session_id,
+        workspace=workspace,
+        continuity=(CompletedRunContinuity("task", "final"),),
+    )
+    monkeypatch.setenv("CODING_AGENT_SESSION_DIR", str(session_directory))
+    for name in (
+        "CODING_AGENT_MODEL",
+        "CODING_AGENT_BASE_URL",
+        "CODING_AGENT_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    def must_not_construct(config):  # type: ignore[no-untyped-def]
+        raise AssertionError("model client constructed during session deletion")
+
+    monkeypatch.setattr(cli, "OpenAICompatibleModelClient", must_not_construct)
+
+    deleted_exit = cli.main(
+        [
+            "--workspace",
+            str(workspace),
+            "--json",
+            "--delete-session",
+            session_id,
+        ]
+    )
+    deleted = json.loads(capsys.readouterr().out)
+    missing_exit = cli.main(
+        [
+            "--workspace",
+            str(workspace),
+            "--json",
+            "--delete-session",
+            session_id,
+        ]
+    )
+    missing = json.loads(capsys.readouterr().out)
+
+    assert deleted_exit == 0
+    assert deleted == {
+        "schema_version": 1,
+        "operation": "delete_session",
+        "session_id": session_id,
+        "deleted": True,
+    }
+    assert missing_exit == 2
+    assert missing["normalized_error"]["code"] == "SESSION_NOT_FOUND"
+    assert not (session_directory / f"{session_id}.json").exists()
+
+
+@pytest.mark.parametrize("extra", [["task"], ["--non-interactive"]])
+def test_session_management_rejects_run_arguments_before_model_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    extra: list[str],
+) -> None:
+    for name in (
+        "CODING_AGENT_MODEL",
+        "CODING_AGENT_BASE_URL",
+        "CODING_AGENT_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    exit_code = cli.main(
+        ["--workspace", str(tmp_path), "--json", "--list-sessions", *extra]
+    )
+    document = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 2
+    assert (
+        document["normalized_error"]["code"]
+        == "SESSION_MANAGEMENT_ARGUMENT_CONFLICT"
+    )
+    assert document["model_turns"] == 0
 
 
 def test_json_startup_and_missing_task_failures_remain_machine_readable(
