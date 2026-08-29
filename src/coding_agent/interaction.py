@@ -54,6 +54,17 @@ class UserInteractionError(RuntimeError):
     """A terminal failure of the user interaction channel."""
 
 
+class InteractionRequiredError(UserInteractionError):
+    """Expected boundary when explicit non-interactive execution needs input."""
+
+    def __init__(
+        self,
+        request: ConfirmationRequest | ClarificationRequest,
+    ) -> None:
+        super().__init__("external user interaction is required")
+        self.request = request
+
+
 class UserInteraction(Protocol):
     """Runtime-facing boundary for permission confirmation."""
 
@@ -92,6 +103,16 @@ class FakeUserInteraction:
         return self._answers.pop(0)
 
 
+class NonInteractiveUserInteraction:
+    """Never read stdin or choose an answer, rejection, or approval."""
+
+    def confirm(self, request: ConfirmationRequest) -> ConfirmationDecision:
+        raise InteractionRequiredError(request)
+
+    def ask(self, request: ClarificationRequest) -> ClarificationResponse:
+        raise InteractionRequiredError(request)
+
+
 __all__ = [
     "ConfirmationDecision",
     "ConfirmationRequest",
@@ -99,6 +120,8 @@ __all__ = [
     "ClarificationResponse",
     "ClarificationStatus",
     "FakeUserInteraction",
+    "InteractionRequiredError",
+    "NonInteractiveUserInteraction",
     "UserInteraction",
     "UserInteractionError",
 ]

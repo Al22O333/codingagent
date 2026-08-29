@@ -482,6 +482,8 @@ PreparedToolCall
 * 修改 Runtime lifecycle；
 * 判断风险。
 
+An explicit non-interactive implementation of this port never reads stdin. Instead, `confirm()` or `ask()` raises a typed `InteractionRequiredError` carrying the immutable `ConfirmationRequest` or `ClarificationRequest`. AgentRuntime catches this expected boundary before the generic `UserInteractionError` path, projects bounded Secret-safe terminal facts, terminates the Run with `PERMISSION_REQUIRED` or `CLARIFICATION_REQUIRED`, and clears PendingAction / wait state without producing a ToolResult or another Model Turn.
+
 ---
 
 ## 5. Internal Model Protocol
@@ -1623,6 +1625,8 @@ REJECT
 ```
 
 `UserInteractionError` 进入 Runtime failure path，使当前 Run `FAILED`；它不产生新的 Model Turn。
+
+`InteractionRequiredError` is not a channel failure. It is used only by explicit non-interactive composition and maps to the dedicated terminal reasons above. It never maps to APPROVE, REJECT, ANSWERED, or CANCELLED and therefore cannot silently choose on the user's behalf.
 
 ---
 

@@ -766,6 +766,120 @@ def test_json_startup_and_missing_task_failures_remain_machine_readable(
     assert "Traceback" not in missing_workspace_capture.out
 
 
+def test_noninteractive_json_never_reads_stdin_and_reports_clarification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _configure_main_environment(monkeypatch)
+    secret = "test-key"
+    fake = FakeModelClient(
+        [
+            ModelResponse(
+                None,
+                (
+                    ToolCall(
+                        "ask",
+                        "ask_user",
+                        {"question": f"Which format should contain {secret}?"},
+                    ),
+                ),
+            )
+        ]
+    )
+    monkeypatch.setattr(cli, "OpenAICompatibleModelClient", lambda config: fake)
+    guarded_stdin = StringIO("SHOULD_NOT_BE_READ")
+    monkeypatch.setattr(sys, "stdin", guarded_stdin)
+
+    exit_code = cli.main(
+        ["--workspace", str(tmp_path), "--json", "--non-interactive", "implement"]
+    )
+    captured = capsys.readouterr()
+    document = json.loads(captured.out)
+
+    assert exit_code == 3
+    assert captured.out.count("\n") == 1
+    assert document["lifecycle_state"] == "FAILED"
+    assert document["terminal_reason"] == "CLARIFICATION_REQUIRED"
+    assert document["required_interaction"] == {
+        "kind": "CLARIFICATION",
+        "question": "Which format should contain <redacted>?",
+        "tool_name": None,
+        "operation_category": None,
+        "action_preview": None,
+        "reason_code": None,
+        "risk": None,
+        "exact_scope": None,
+    }
+    assert secret not in captured.out
+    assert secret not in captured.err
+    assert guarded_stdin.tell() == 0
+
+
+def test_noninteractive_permission_result_is_exact_and_action_is_not_executed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _configure_main_environment(monkeypatch)
+    target = tmp_path / "obsolete.txt"
+    target.write_text("sentinel", encoding="utf-8")
+    fake = FakeModelClient(
+        [
+            ModelResponse(
+                None,
+                (ToolCall("delete", "delete_path", {"path": "obsolete.txt"}),),
+            )
+        ]
+    )
+    monkeypatch.setattr(cli, "OpenAICompatibleModelClient", lambda config: fake)
+    guarded_stdin = StringIO("SHOULD_NOT_BE_READ")
+    monkeypatch.setattr(sys, "stdin", guarded_stdin)
+
+    exit_code = cli.main(
+        [
+            "--workspace",
+            str(tmp_path),
+            "--json",
+            "--non-interactive",
+            "delete obsolete.txt",
+        ]
+    )
+    document = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 3
+    assert document["terminal_reason"] == "PERMISSION_REQUIRED"
+    required = document["required_interaction"]
+    assert required["kind"] == "PERMISSION"
+    assert required["tool_name"] == "delete_path"
+    assert required["operation_category"] == "delete_path"
+    assert required["action_preview"] == "obsolete.txt"
+    assert required["reason_code"] == "FILE_DELETE_CONFIRMATION"
+    assert required["exact_scope"] == "one exact prepared action; not approved or executed"
+    assert target.read_text(encoding="utf-8") == "sentinel"
+    assert guarded_stdin.tell() == 0
+
+
+def test_noninteractive_requires_one_shot_task_in_human_and_json_modes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _configure_main_environment(monkeypatch)
+
+    human_exit = cli.main(["--workspace", str(tmp_path), "--non-interactive"])
+    human = capsys.readouterr()
+    json_exit = cli.main(
+        ["--workspace", str(tmp_path), "--json", "--non-interactive"]
+    )
+    machine = json.loads(capsys.readouterr().out)
+
+    assert human_exit == 2
+    assert "requires a one-shot task" in human.err
+    assert json_exit == 2
+    assert machine["normalized_error"]["code"] == "NON_INTERACTIVE_ONE_SHOT_REQUIRED"
+
+
 def test_invalid_workspace_fails_startup_before_model_client_construction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

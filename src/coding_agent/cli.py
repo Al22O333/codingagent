@@ -24,6 +24,7 @@ from .interaction import (
     ClarificationStatus,
     ConfirmationDecision,
     ConfirmationRequest,
+    NonInteractiveUserInteraction,
     UserInteraction,
     UserInteractionError,
 )
@@ -642,6 +643,11 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="emit one machine-readable document for a one-shot task",
     )
+    parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="run one task without ever reading user input",
+    )
     persistence = parser.add_mutually_exclusive_group()
     persistence.add_argument(
         "--persist-session",
@@ -669,14 +675,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         for name in _DEFAULT_SECRET_ENVIRONMENT_NAMES
         if (value := os.environ.get(name))
     )
-    if args.json and not args.task:
-        _write_json_document(
-            _startup_failure_document(
-                "JSON_ONE_SHOT_REQUIRED",
-                "--json requires a one-shot task",
-            ),
-            sys.stdout,
+    if (args.json or args.non_interactive) and not args.task:
+        code = (
+            "NON_INTERACTIVE_ONE_SHOT_REQUIRED"
+            if args.non_interactive
+            else "JSON_ONE_SHOT_REQUIRED"
         )
+        message = (
+            "--non-interactive requires a one-shot task"
+            if args.non_interactive
+            else "--json requires a one-shot task"
+        )
+        if args.json:
+            _write_json_document(
+                _startup_failure_document(code, message),
+                sys.stdout,
+            )
+        else:
+            print(f"启动失败：{message}", file=sys.stderr)
         return 2
     try:
         config = load_config(
@@ -703,6 +719,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             resumed_session_id = checkpoint.session_id
         runtime = build_runtime(
             config,
+            user_interaction=(
+                NonInteractiveUserInteraction()
+                if args.non_interactive
+                else None
+            ),
             stdout=sys.stderr if args.json else sys.stdout,
             session_id=resumed_session_id,
             restored_continuity=restored_continuity,
@@ -811,7 +832,9 @@ def _run_task(
         return 130
     stdout.write(f"\n{_DIVIDER}\n✗ 本次运行失败\n{_DIVIDER}\n\n")
     stdout.write("原因：" + _failure_message(run.termination_reason, run.limit_reached) + "\n")
-    return 1
+    if run.required_interaction is not None:
+        stdout.write(_render_required_interaction(run) + "\n")
+    return _run_exit_code(run)
 
 
 def _run_json_document(
@@ -863,6 +886,24 @@ def _run_json_document(
             session_checkpoint_updated=session_checkpoint_updated,
             session_error=session_error,
         )
+    if run.required_interaction is not None:
+        required = run.required_interaction
+        document["required_interaction"] = {
+            "kind": required.kind.value,
+            "question": _redact_values(required.question, secret_values)
+            if required.question is not None
+            else None,
+            "tool_name": required.tool_name,
+            "operation_category": required.tool_name,
+            "action_preview": _redact_values(required.action_preview, secret_values)
+            if required.action_preview is not None
+            else None,
+            "reason_code": required.reason_code,
+            "risk": _redact_values(required.risk, secret_values)
+            if required.risk is not None
+            else None,
+            "exact_scope": required.exact_scope,
+        }
     return document
 
 
@@ -922,6 +963,11 @@ def _run_exit_code(run: AgentRun) -> int:
         return 0
     if run.state is RunState.CANCELLED:
         return 130
+    if run.termination_reason in {
+        TerminationReason.CLARIFICATION_REQUIRED,
+        TerminationReason.PERMISSION_REQUIRED,
+    }:
+        return 3
     return 1
 
 
@@ -946,9 +992,33 @@ def _failure_message(
         return f"运行达到资源限制{detail}。"
     if reason is TerminationReason.USER_INTERACTION_FAILURE:
         return "终端交互失败。"
+    if reason is TerminationReason.CLARIFICATION_REQUIRED:
+        return "任务需要用户补充信息；non-interactive 模式未读取输入。"
+    if reason is TerminationReason.PERMISSION_REQUIRED:
+        return "操作需要用户明确授权；non-interactive 模式未执行该操作。"
     if reason is TerminationReason.RUNTIME_FAILURE:
         return "Agent 无法安全地继续运行。"
     return "运行失败。"
+
+
+def _render_required_interaction(run: AgentRun) -> str:
+    required = run.required_interaction
+    if required is None:
+        return ""
+    if required.question is not None:
+        return "问题：" + _bounded_head_tail(_single_line(required.question), 1_000)
+    parts = [
+        f"操作类别：{required.tool_name or 'unknown'}",
+        "精确范围：" + (required.exact_scope or "one exact action"),
+    ]
+    if required.action_preview:
+        parts.append(
+            "操作预览："
+            + _bounded_head_tail(_single_line(required.action_preview), 1_000)
+        )
+    if required.risk:
+        parts.append("风险：" + _bounded_head_tail(_single_line(required.risk), 1_000))
+    return "\n".join(parts)
 
 
 __all__ = [

@@ -33,6 +33,7 @@ from .interaction import (
     ConfirmationRequest,
     ClarificationRequest,
     ClarificationStatus,
+    InteractionRequiredError,
     UserInteraction,
     UserInteractionError,
 )
@@ -104,6 +105,8 @@ class TerminationReason(StrEnum):
     PROVIDER_FAILURE = "PROVIDER_FAILURE"
     LIMIT_REACHED = "LIMIT_REACHED"
     USER_CANCELLATION = "USER_CANCELLATION"
+    CLARIFICATION_REQUIRED = "CLARIFICATION_REQUIRED"
+    PERMISSION_REQUIRED = "PERMISSION_REQUIRED"
     USER_INTERACTION_FAILURE = "USER_INTERACTION_FAILURE"
     RUNTIME_FAILURE = "RUNTIME_FAILURE"
 
@@ -113,6 +116,13 @@ class WaitReason(StrEnum):
 
     PERMISSION_CONFIRMATION = "PERMISSION_CONFIRMATION"
     CLARIFICATION = "CLARIFICATION"
+
+
+class RequiredInteractionKind(StrEnum):
+    """Safe terminal interaction categories for non-interactive execution."""
+
+    CLARIFICATION = "CLARIFICATION"
+    PERMISSION = "PERMISSION"
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +154,19 @@ class PendingAction:
 
     prepared_call: PreparedToolCall
     permission_reason: PermissionCheckResult
+
+
+@dataclass(frozen=True, slots=True)
+class RequiredInteraction:
+    """Bounded terminal facts that cannot authorize or resume an action."""
+
+    kind: RequiredInteractionKind
+    question: str | None = None
+    tool_name: str | None = None
+    action_preview: str | None = None
+    reason_code: str | None = None
+    risk: str | None = None
+    exact_scope: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +226,7 @@ class AgentRun:
     completion_audit_active: bool = False
     pending_final_candidate: str | None = None
     workspace_change_facts: WorkspaceChangeFacts | None = None
+    required_interaction: RequiredInteraction | None = None
     _workspace_start_snapshot: WorkspaceSnapshot | None = field(
         default=None,
         repr=False,
@@ -305,6 +329,20 @@ class AgentRuntime:
                 TerminationReason.USER_CANCELLATION,
                 run_started_at,
             )
+        except InteractionRequiredError as error:
+            agent_run.required_interaction = self._required_interaction(error)
+            reason = (
+                TerminationReason.PERMISSION_REQUIRED
+                if isinstance(error.request, ConfirmationRequest)
+                else TerminationReason.CLARIFICATION_REQUIRED
+            )
+            self._terminate_run(
+                agent_run,
+                RunState.FAILED,
+                reason,
+                run_started_at,
+                error,
+            )
         except UserInteractionError as error:
             self._terminate_run(
                 agent_run,
@@ -346,6 +384,31 @@ class AgentRuntime:
                     tool_call_attempts=agent_run.tool_call_attempts,
                 )
         return agent_run
+
+    def _required_interaction(
+        self,
+        error: InteractionRequiredError,
+    ) -> RequiredInteraction:
+        request = error.request
+        if isinstance(request, ClarificationRequest):
+            return RequiredInteraction(
+                kind=RequiredInteractionKind.CLARIFICATION,
+                question=_bounded_observation_text(
+                    self._redact_runtime_secrets(request.question), 1_000
+                ),
+            )
+        return RequiredInteraction(
+            kind=RequiredInteractionKind.PERMISSION,
+            tool_name=request.tool_name[:200],
+            action_preview=_bounded_observation_text(
+                self._redact_runtime_secrets(request.action_summary), 1_000
+            ),
+            reason_code=request.reason_code[:200],
+            risk=_bounded_observation_text(
+                self._redact_runtime_secrets(request.risk_summary), 1_000
+            ),
+            exact_scope="one exact prepared action; not approved or executed",
+        )
 
     def _run_until_terminal(
         self,
@@ -1293,6 +1356,8 @@ __all__ = [
     "RuntimeEvent",
     "RunState",
     "PendingAction",
+    "RequiredInteraction",
+    "RequiredInteractionKind",
     "Session",
     "TerminationReason",
     "WaitReason",

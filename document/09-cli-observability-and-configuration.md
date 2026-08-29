@@ -1480,7 +1480,26 @@ task_succeeded: true
 
 ---
 
-### 42.2 Explicit Persistent Session CLI
+### 42.2 Explicit Non-Interactive One-Shot
+
+CLI 支持：
+
+```text
+coding-agent --workspace <PATH> --non-interactive <one-shot task...>
+coding-agent --workspace <PATH> --json --non-interactive <one-shot task...>
+```
+
+`--non-interactive` 必须有 positional task，不进入 top-level prompt，不读取 stdin，不 auto-approve permission，也不为 clarification制造答案。Shell stdin继续使用现有 noninteractive contract。普通不需要交互的任务保持原 Agent loop。
+
+若模型请求 `ask_user`，Run 终止为 `FAILED / CLARIFICATION_REQUIRED`；若一个 prepared action需要 `CONFIRM`，Run 在 action执行前终止为 `FAILED / PERMISSION_REQUIRED`。两者 process exit code均为 `3`，表示安全地需要外部输入；Policy `DENY` 仍是给模型的普通 rejection observation，不伪装成 permission request。
+
+Machine result 在这两个终止原因下增加一个 bounded `required_interaction` object。Clarification只包含 kind与question；permission只包含 kind、tool/operation category、bounded action preview、reason code、risk和 exact one-action scope。它不包含 PendingAction、完整 Tool arguments、content-bearing edits、Runtime Secret或可重放 approval token。其他 JSON shape保持不变。
+
+Interactive mode、无 `--non-interactive` 的 `--json` mode以及 ConsoleUserInteraction语义保持不变。
+
+---
+
+### 42.3 Explicit Persistent Session CLI
 
 CLI 提供两个显式入口：
 

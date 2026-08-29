@@ -606,12 +606,15 @@ Run 因 Runtime 无法合理继续而非正常结束。
 * invalid Runtime configuration discovered during run
 * internal invariant violation
 * `UserInteractionError` caused by a real terminal I/O infrastructure failure
+* an explicit non-interactive Run reaches a required clarification or exact-action permission boundary
 
 FAILED 应带明确的：
 
 ```text
 termination_reason
 ```
+
+Non-interactive input requirements use the distinct terminal reasons `CLARIFICATION_REQUIRED` and `PERMISSION_REQUIRED`; they are expected automation outcomes, not terminal I/O failures. Runtime must retain only bounded safe request facts for the terminal result, clear every pending action/request, and never execute or auto-approve the blocked action.
 
 ---
 
