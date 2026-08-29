@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from .protocol import (
     AssistantMessage,
     InternalMessage,
@@ -22,6 +24,14 @@ class ContextOrderError(ValueError):
 
 class ContextLimitError(RuntimeError):
     """Raised when mandatory model-visible context cannot fit its size bound."""
+
+
+@dataclass(frozen=True, slots=True)
+class CompletedRunContinuity:
+    """Terminal-safe conversational continuity for one completed Run."""
+
+    task: str
+    final_response: str
 
 
 class ContextManager:
@@ -53,6 +63,45 @@ class ContextManager:
     def history_incomplete(self) -> bool:
         """Whether this Run has permanently evicted model-visible history."""
         return self._history_incomplete
+
+    @property
+    def completed_run_continuity(self) -> tuple[CompletedRunContinuity, ...]:
+        """Export only bounded completed task/final pairs."""
+
+        records: list[CompletedRunContinuity] = []
+        for unit in self._completed_run_continuity:
+            if (
+                len(unit) == 2
+                and isinstance(unit[0], UserMessage)
+                and isinstance(unit[1], AssistantMessage)
+                and not unit[1].tool_calls
+                and unit[1].text is not None
+            ):
+                records.append(
+                    CompletedRunContinuity(unit[0].text, unit[1].text)
+                )
+        return tuple(records)
+
+    def restore_completed_run_continuity(
+        self,
+        records: tuple[CompletedRunContinuity, ...],
+    ) -> None:
+        """Restore validated historical pairs before a new Run starts."""
+
+        if self._run_active:
+            raise ContextOrderError("cannot restore continuity during an active run")
+        if not all(isinstance(record, CompletedRunContinuity) for record in records):
+            raise TypeError("continuity records must be CompletedRunContinuity")
+        retained = records[-self._max_retained_completed_runs :]
+        if self._max_retained_completed_runs == 0:
+            retained = ()
+        self._completed_run_continuity = [
+            (
+                UserMessage(record.task),
+                AssistantMessage(record.final_response),
+            )
+            for record in retained
+        ]
 
     def start_run(self, message: UserMessage) -> None:
         """Start one Run with fresh transient history."""
@@ -346,4 +395,9 @@ class ContextManager:
         return size
 
 
-__all__ = ["ContextLimitError", "ContextManager", "ContextOrderError"]
+__all__ = [
+    "CompletedRunContinuity",
+    "ContextLimitError",
+    "ContextManager",
+    "ContextOrderError",
+]

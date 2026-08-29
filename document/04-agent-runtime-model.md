@@ -42,7 +42,7 @@ v1 Runtime 遵循以下原则：
 
 ### 3.1 Session
 
-一个 Session 对应 Agent 进程中的一次连续交互环境。
+一个 Session 对应同一 workspace 中的一条连续交互线。它可以只存在于当前进程，也可以由 09 的显式 CLI 入口保存和恢复 terminal-safe continuity。
 
 Session 至少包含：
 
@@ -60,8 +60,9 @@ Session
 
 * 只绑定一个 workspace root
 * 可以依次执行多个 Agent Run
-* 在进程退出后不要求持久化
-* v1 不支持进程重启后的 Session resume
+* 默认仍只存在于当前进程
+* 只有用户显式请求 persistence 时，才保存 07 定义的 bounded completed-run continuity
+* resume 后创建全新的 Runtime execution state，不恢复任何 active Run 或 pending execution
 
 Session 本身不是一次具体任务的执行状态。
 
@@ -130,7 +131,7 @@ Workspace State 是项目事实来源。Conversation Context 中的文件内容�
 
 Runtime State 不复制整个 Workspace，也不保存全量文件镜像。它只保存驱动当前 Agent Run 和进程内 Session continuity 所需的结构化状态。
 
-v1 中的 Memory 仅指当前 Agent Run 或进程内 Session continuity 所需的结构化状态和保留信息，不包含跨进程 Persistent Memory、Vector Database、Embedding Memory 或长期用户记忆。
+本项目中的 Memory 仅指当前 Agent Run、进程内 Session continuity，或显式保存的 terminal-safe completed-run continuity；它不包含 Runtime snapshot、Vector Database、Embedding Memory 或长期用户记忆。
 
 Conversation Context 的具体保留、裁剪、摘要和 stale-context 处理由 07 定义。
 
@@ -193,6 +194,26 @@ Run #2 不应机械重新携带：
 Runtime 只规定：
 
 > **Session provides continuity; Agent Run provides execution isolation.**
+
+---
+
+### 4.3 Terminal-Safe Cross-Process Resume
+
+Persistent Session resume 只恢复 conversational continuity，不恢复 execution state。一个可恢复 checkpoint 只由最近 bounded 数量的 `COMPLETED` Run 的 initial task 与真实 Final 组成，并绑定 stable session ID、schema version 与 canonical workspace identity。
+
+新进程 resume 时必须：
+
+```text
+validate checkpoint + workspace identity
+→ create a fresh AgentRuntime / Session execution state
+→ restore bounded historical task/final continuity
+→ re-read current project instructions and workspace truth
+→ start a wholly new Agent Run from the new user task
+```
+
+不得持久化或恢复：pending ToolCall / ToolResult、PendingAction、permission、clarification、active process、candidate Final、completion-audit state、protocol correction、Runtime Secret、provider state、FAILED / CANCELLED Run 或任何 active budget/counter。Checkpoint write failure 不得损坏已有 checkpoint，也不得改变已经终止的 Run lifecycle；CLI 必须单独报告 persistence failure。
+
+Historical continuity 始终可能 stale。它不能创建当前 Run hard constraints，不能证明当前 Workspace State，也不能阻止模型按需重新读取文件和运行验证。
 
 ---
 
@@ -1826,7 +1847,7 @@ v1 应保持以下运行时不变量：
 21. Ctrl+C 属于用户取消，最终状态为 `CANCELLED`。
 22. Agent 可以在无法完成任务时如实产生 Final Response，而不是必须声称成功。
 23. Conversation Context 与实际 Workspace State 冲突时，以 local filesystem / environment 为事实来源。
-24. v1 Memory 不包含跨进程 Persistent Memory、Vector Database、Embedding Memory 或长期用户记忆。
+24. terminal-safe resume只允许显式保存 bounded completed-run continuity；Memory 不包含任意 Runtime snapshot、Vector Database、Embedding Memory 或长期用户记忆。
 25. `WAITING_FOR_USER` 不计入 active run duration；独立的用户等待超时由 09 决定。
 26. 每个进入处理 pipeline 的 Tool Call 都消耗一次 Tool Call Attempt；batch 终止后未处理的 calls 不计 attempt。
 27. Batch 遇到 validation error、policy rejection、Tool Operation Failure、Unsuccessful Command Outcome 或用户交互后 fail-stop，由新的 Model Turn 重新决策。

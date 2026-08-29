@@ -27,7 +27,7 @@ from .constraints import (
     apply_constraint_update,
     normalize_explicit_constraint_update,
 )
-from .context import ContextManager
+from .context import CompletedRunContinuity, ContextManager
 from .interaction import (
     ConfirmationDecision,
     ConfirmationRequest,
@@ -247,6 +247,7 @@ class AgentRuntime:
         observer: Callable[[RuntimeEvent], object] | None = None,
         runtime_secret_values: tuple[str, ...] = (),
         workspace_change_observer: WorkspaceChangeObserver | None = None,
+        session_id: str | None = None,
     ) -> None:
         if (
             not isfinite(transport_retry_base_delay_seconds)
@@ -278,7 +279,15 @@ class AgentRuntime:
             value for value in runtime_secret_values if value
         )
         self._workspace_change_observer = workspace_change_observer
-        self.session = Session()
+        self.session = (
+            Session(session_id=session_id) if session_id is not None else Session()
+        )
+
+    @property
+    def completed_run_continuity(self) -> tuple[CompletedRunContinuity, ...]:
+        """Expose only terminal-safe Context continuity for explicit persistence."""
+
+        return self._context_manager.completed_run_continuity
 
     def run(self, task: str) -> AgentRun:
         """Run one user task until a final response or terminal failure."""

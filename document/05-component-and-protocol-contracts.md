@@ -247,6 +247,7 @@ CLI / Composition Root
         ▼
    AgentRuntime
    ├── ContextManager
+   ├── SessionStore (only when explicit persistence is requested)
    ├── ModelClient
    ├── ToolRegistry
    ├── PolicyEngine
@@ -325,7 +326,17 @@ CLI rendering
 
 ---
 
-### 4.3 ModelClient Protocol
+### 4.3 SessionStore
+
+`SessionStore` 是 composition-root 使用的 Lean terminal-safe persistence boundary。它只序列化 07 定义的 immutable completed-run continuity records 与最小 session metadata；它不参与 Agent loop、Run lifecycle、Context eviction、Policy 或 Tool dispatch。
+
+它必须提供 deterministic load/save failure codes，验证 canonical session ID、schema version 和 workspace identity，并以 sibling temporary file + atomic replace 更新单个 session document。它不得解释对话语义、扫描 Workspace、序列化 ContextManager 内部状态，或持有 mutable `AgentRun`。
+
+`ContextManager` 只暴露 bounded completed-run continuity 的 typed import/export；只有在没有 active Run 时才允许 restore。`AgentRuntime` resume 后仍拥有一个全新的 `Session` 和全新的 Runs。
+
+---
+
+### 4.4 ModelClient Protocol
 
 `ModelClient` 是 `AgentRuntime` 面向模型调用的稳定 Protocol / interface。
 
@@ -345,7 +356,7 @@ Provider SDK 是否具备 streaming capability 不影响该 contract；v1 Runtim
 
 ---
 
-### 4.4 OpenAICompatibleModelClient
+### 4.5 OpenAICompatibleModelClient
 
 v1 的具体实现 `OpenAICompatibleModelClient` implements `ModelClient` Protocol，并在内部负责：
 
@@ -375,7 +386,7 @@ Provider-specific adaptation 是 concrete ModelClient 的内部职责，不构�
 
 ---
 
-### 4.5 ToolRegistry
+### 4.6 ToolRegistry
 
 `ToolRegistry` 负责：
 
@@ -402,7 +413,7 @@ ToolRegistry 不负责：
 
 ---
 
-### 4.6 Tool
+### 4.7 Tool
 
 Tool 负责：
 
@@ -416,7 +427,7 @@ Tool 不拥有 Agent lifecycle。
 
 ---
 
-### 4.7 PolicyEngine
+### 4.8 PolicyEngine
 
 `PolicyEngine` 负责两个独立阶段：
 
@@ -453,7 +464,7 @@ PreparedToolCall
 
 ---
 
-### 4.8 UserInteraction
+### 4.9 UserInteraction
 
 `UserInteraction` 是 Runtime 与用户之间的 I/O port。
 

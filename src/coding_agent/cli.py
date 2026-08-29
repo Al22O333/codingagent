@@ -13,7 +13,7 @@ from typing import TextIO
 
 from .ask_user import AskUserTool
 from .config import AgentConfig, load_agent_config
-from .context import ContextManager
+from .context import CompletedRunContinuity, ContextManager
 from .create_file import CreateFileTool
 from .discovery import ListDirectoryTool, SearchFilesTool
 from .edit_file import ApplyEditsTool, EditFileTool
@@ -41,6 +41,7 @@ from .runtime import (
     TerminationReason,
 )
 from .search_text import SearchTextTool
+from .session_store import SessionStore, SessionStoreError
 from .shell import ShellBackend, ShellTool
 from .tooling import ToolRegistry
 from .workspace import WorkspacePathResolver
@@ -171,6 +172,8 @@ def build_runtime(
     user_interaction: UserInteraction | None = None,
     stdin: TextIO | None = None,
     stdout: TextIO | None = None,
+    session_id: str | None = None,
+    restored_continuity: tuple[CompletedRunContinuity, ...] = (),
 ) -> AgentRuntime:
     """Construct all v1 components and bind them to one workspace."""
     resolver = WorkspacePathResolver(config.workspace)
@@ -218,15 +221,17 @@ def build_runtime(
     observer = (
         _event_writer(stdout, debug=config.debug) if stdout is not None else None
     )
+    context_manager = ContextManager(
+        max_context_chars=config.max_context_chars,
+        root_project_instructions=RootProjectInstructions(
+            resolver,
+            runtime_secret_values=(config.api_key,),
+        ),
+    )
+    context_manager.restore_completed_run_continuity(restored_continuity)
     return AgentRuntime(
         concrete_model_client,
-        ContextManager(
-            max_context_chars=config.max_context_chars,
-            root_project_instructions=RootProjectInstructions(
-                resolver,
-                runtime_secret_values=(config.api_key,),
-            ),
-        ),
+        context_manager,
         registry,
         RuntimeLimits(
             max_model_turns=config.max_model_turns,
@@ -243,6 +248,7 @@ def build_runtime(
         workspace_change_observer=GitWorkspaceChangeObserver(
             resolver.workspace_root
         ),
+        session_id=session_id,
     )
 
 
@@ -636,6 +642,17 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="emit one machine-readable document for a one-shot task",
     )
+    persistence = parser.add_mutually_exclusive_group()
+    persistence.add_argument(
+        "--persist-session",
+        action="store_true",
+        help="persist bounded completed-run continuity for later resume",
+    )
+    persistence.add_argument(
+        "--resume",
+        metavar="SESSION_UUID",
+        help="resume one exact terminal-safe persisted session",
+    )
     parser.add_argument(
         "task",
         nargs="*",
@@ -672,15 +689,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_context_chars=args.max_context_chars,
             debug=args.debug,
         )
+        session_store = (
+            SessionStore(config.session_directory)
+            if args.persist_session or args.resume is not None
+            else None
+        )
+        restored_continuity: tuple[CompletedRunContinuity, ...] = ()
+        resumed_session_id: str | None = None
+        if args.resume is not None:
+            assert session_store is not None
+            checkpoint = session_store.load(args.resume, config.workspace)
+            restored_continuity = checkpoint.continuity
+            resumed_session_id = checkpoint.session_id
         runtime = build_runtime(
             config,
             stdout=sys.stderr if args.json else sys.stdout,
+            session_id=resumed_session_id,
+            restored_continuity=restored_continuity,
         )
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, SessionStoreError) as error:
+        code = error.code if isinstance(error, SessionStoreError) else "STARTUP_FAILURE"
         if args.json:
             message = _redact_values(str(error), startup_secret_values)
             _write_json_document(
-                _startup_failure_document("STARTUP_FAILURE", message),
+                _startup_failure_document(code, message),
                 sys.stdout,
             )
             return 2
@@ -689,20 +721,43 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.json:
         run = runtime.run(" ".join(args.task))
+        checkpoint_updated, session_error = _checkpoint_session(
+            runtime,
+            run,
+            session_store,
+            config,
+            secret_values=(config.api_key, *startup_secret_values),
+        )
         _write_json_document(
             _run_json_document(
                 run,
                 secret_values=(config.api_key, *startup_secret_values),
+                session_id=(
+                    runtime.session.session_id
+                    if session_store is not None
+                    else None
+                ),
+                session_checkpoint_updated=checkpoint_updated,
+                session_error=session_error,
             ),
             sys.stdout,
         )
-        return _run_exit_code(run)
+        return 1 if session_error is not None else _run_exit_code(run)
 
     print(STARTUP_MESSAGE)
     print(f"{_UI_TEXT['workspace']}  {config.workspace.resolve(strict=True)}")
     print(f"{_UI_TEXT['model']}    {config.model}")
+    if session_store is not None:
+        print(f"Session  {runtime.session.session_id}")
     if args.task:
-        return _run_task(runtime, " ".join(args.task), sys.stdout)
+        return _run_task(
+            runtime,
+            " ".join(args.task),
+            sys.stdout,
+            session_store=session_store,
+            config=config,
+            secret_values=(config.api_key, *startup_secret_values),
+        )
 
     while True:
         try:
@@ -715,16 +770,41 @@ def main(argv: Sequence[str] | None = None) -> int:
             continue
         if task.casefold() in {"/exit", "/quit"}:
             return 0
-        _run_task(runtime, task, sys.stdout)
+        _run_task(
+            runtime,
+            task,
+            sys.stdout,
+            session_store=session_store,
+            config=config,
+            secret_values=(config.api_key, *startup_secret_values),
+        )
 
 
-def _run_task(runtime: AgentRuntime, task: str, stdout: TextIO) -> int:
+def _run_task(
+    runtime: AgentRuntime,
+    task: str,
+    stdout: TextIO,
+    *,
+    session_store: SessionStore | None = None,
+    config: CLIConfig | None = None,
+    secret_values: tuple[str, ...] = (),
+) -> int:
     stdout.write(_UI_TEXT["running"] + "\n")
     stdout.flush()
     run = runtime.run(task)
+    _, session_error = _checkpoint_session(
+        runtime,
+        run,
+        session_store,
+        config,
+        secret_values=secret_values,
+    )
     if run.state is RunState.COMPLETED:
         stdout.write(f"\n{_DIVIDER}\n◆ 运行结束\n{_DIVIDER}\n\n")
         stdout.write(f"{run.final_response}\n")
+        if session_error is not None:
+            stdout.write(f"\nSession checkpoint failed: {session_error['message']}\n")
+            return 1
         return 0
     if run.state is RunState.CANCELLED:
         stdout.write(f"\n{_DIVIDER}\n— 已取消本次运行\n{_DIVIDER}\n")
@@ -738,6 +818,9 @@ def _run_json_document(
     run: AgentRun,
     *,
     secret_values: tuple[str, ...],
+    session_id: str | None = None,
+    session_checkpoint_updated: bool = False,
+    session_error: dict[str, str] | None = None,
 ) -> dict[str, object]:
     """Project one terminal Run into the stable machine-readable schema."""
 
@@ -760,7 +843,7 @@ def _run_json_document(
                 1_000,
             ),
         }
-    return {
+    document: dict[str, object] = {
         "schema_version": 1,
         "lifecycle_state": run.state.value,
         "final_response": final_response,
@@ -774,6 +857,40 @@ def _run_json_document(
         "tool_attempts": run.tool_call_attempts,
         "limit_reached": run.limit_reached,
     }
+    if session_id is not None:
+        document.update(
+            session_id=session_id,
+            session_checkpoint_updated=session_checkpoint_updated,
+            session_error=session_error,
+        )
+    return document
+
+
+def _checkpoint_session(
+    runtime: AgentRuntime,
+    run: AgentRun,
+    session_store: SessionStore | None,
+    config: CLIConfig | None,
+    *,
+    secret_values: tuple[str, ...],
+) -> tuple[bool, dict[str, str] | None]:
+    """Persist only terminal-safe completed continuity after Runtime cleanup."""
+
+    if session_store is None or config is None or run.state is not RunState.COMPLETED:
+        return False, None
+    try:
+        session_store.save(
+            session_id=runtime.session.session_id,
+            workspace=config.workspace,
+            continuity=runtime.completed_run_continuity,
+            runtime_secret_values=secret_values,
+        )
+    except SessionStoreError as error:
+        return False, {
+            "code": error.code,
+            "message": _bounded_head_tail(_redact_values(str(error), secret_values), 1_000),
+        }
+    return True, None
 
 
 def _startup_failure_document(code: str, message: str) -> dict[str, object]:

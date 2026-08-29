@@ -1480,6 +1480,25 @@ task_succeeded: true
 
 ---
 
+### 42.2 Explicit Persistent Session CLI
+
+CLI 提供两个显式入口：
+
+```text
+coding-agent --workspace <PATH> --persist-session <task...>
+coding-agent --workspace <PATH> --resume <SESSION_UUID> <follow-up task...>
+```
+
+两者也可省略 one-shot task而进入现有 interactive loop。`--persist-session` 创建新的 UUID session；`--resume` 只加载 exact canonical UUID，不创建 missing session。两者互斥。默认 CLI 行为不写 session checkpoint。
+
+Session documents 存在用户级 session directory；测试或受控 automation 可以通过 `CODING_AGENT_SESSION_DIR` 选择独立目录。每个 document 使用 schema version 1，包含 exact session ID、canonical workspace identity、last-completed timestamp 和 bounded completed-run task/final pairs。Missing、corrupt、unknown version、invalid ID 和 wrong workspace 都在 ModelClient construction / Run start 前作为 deterministic startup failure 返回。
+
+每个 `COMPLETED` Run 结束并清理 pending state后原子更新 checkpoint。`FAILED` / `CANCELLED` Run 不更新 checkpoint。写入使用同目录 exclusive temporary file + atomic replace；失败时保留旧 checkpoint并产生独立、Secret-safe persistence error。恢复不会复用旧 project instructions、dirty-workspace snapshot、hard constraints、Runtime counters或 pending state。
+
+Human mode 显示 bounded session ID。`--json` 与 persistence/resume组合时保留现有 schema version和字段，并额外包含 `session_id`、`session_checkpoint_updated` 与 nullable bounded `session_error`；未请求 persistence 时现有 JSON document shape不变。
+
+---
+
 ## Interactive CLI and Session Control
 
 ### 43. Interactive Session Model
@@ -1499,7 +1518,7 @@ Run 3
 
 Session continuity仍遵守04/07。
 
-v1不提供 cross-process resume。
+Cross-process resume 只通过上一节的显式 terminal-safe checkpoint入口提供；默认 interactive Session仍是纯进程内行为。
 
 ---
 
@@ -1770,7 +1789,7 @@ CLI展示 failure reason后：
 9. CANCELLED Run默认返回 top-level prompt。
 10. 一个 terminal Run不得留下阻止同一 Session后续 Run启动的 pending Context/protocol state。
 11. startup invariant failure不进入 interactive Session。
-12. v1不提供 cross-process Session resume。
+12. cross-process resume只恢复 bounded COMPLETED task/final continuity，并创建新的 execution state。
 
 ---
 
@@ -1799,7 +1818,7 @@ EventBus
 ToolRenderer framework
 LoggingService
 TraceCollector
-SessionPersistence
+general SessionPersistence framework
 TerminalUI framework
 ```
 
@@ -1910,7 +1929,6 @@ v1不实现：
 general config files
 configuration profiles
 provider profile registry
-persistent Session resume
 GUI / TUI
 rich interactive panes
 expandable Tool result UI

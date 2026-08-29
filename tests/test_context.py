@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from coding_agent.context import ContextLimitError, ContextManager, ContextOrderError
+from coding_agent.context import (
+    CompletedRunContinuity,
+    ContextLimitError,
+    ContextManager,
+    ContextOrderError,
+)
 from coding_agent.protocol import (
     AssistantMessage,
     RuntimeInstructionMessage,
@@ -156,6 +161,48 @@ def test_failed_and_cancelled_runs_do_not_enter_continuity() -> None:
     context.start_run(UserMessage("Next task"))
 
     assert context.build_messages() == (UserMessage("Next task"),)
+
+
+def test_terminal_safe_continuity_export_and_restore_excludes_pending_state() -> None:
+    source = ContextManager(max_retained_completed_runs=1)
+    source.start_run(UserMessage("Completed task"))
+    source.record_assistant_message(AssistantMessage("Completed final"))
+    source.end_run(completed=True)
+    source.start_run(UserMessage("Active task"))
+    source.record_assistant_message(
+        AssistantMessage(None, (_tool_call("pending"),))
+    )
+
+    exported = source.completed_run_continuity
+
+    assert exported == (
+        CompletedRunContinuity("Completed task", "Completed final"),
+    )
+    restored = ContextManager(max_retained_completed_runs=1)
+    restored.restore_completed_run_continuity(exported)
+    restored.start_run(UserMessage("Fresh task"))
+    assert restored.build_messages() == (
+        UserMessage("Completed task"),
+        AssistantMessage("Completed final"),
+        UserMessage("Fresh task"),
+    )
+
+
+def test_restore_is_rejected_during_active_run_and_respects_retention_bound() -> None:
+    context = ContextManager(max_retained_completed_runs=1)
+    context.restore_completed_run_continuity(
+        (
+            CompletedRunContinuity("old", "old final"),
+            CompletedRunContinuity("new", "new final"),
+        )
+    )
+    assert context.completed_run_continuity == (
+        CompletedRunContinuity("new", "new final"),
+    )
+    context.start_run(UserMessage("current"))
+
+    with pytest.raises(ContextOrderError, match="active run"):
+        context.restore_completed_run_continuity(())
 
 
 def test_end_run_clears_pending_tool_correspondence() -> None:

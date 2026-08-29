@@ -940,6 +940,20 @@ Run 建立自动 cross-run continuity record。
 
 后续如果用户希望继续，应以新的 User Task 和当前 Workspace State 为基础。
 
+### 18.1 Persistent Completed-Run Continuity
+
+当用户通过 09 的显式 persistence CLI 请求保存 Session 时，ContextManager 当前保留的 bounded `COMPLETED` Run continuity pairs 可以跨进程序列化。持久化表示仍然只包含：
+
+```text
+Initial User Task
++
+Final Assistant Response
+```
+
+每个字段和整个 document 均有 deterministic size bound；已知 Runtime Secret 在写入前替换为 redaction marker。Tool units、provider reasoning、project instructions、current-run messages、constraint state、pending correspondence 和 `history_incomplete` 均不在 export contract 中。
+
+Restore 只把验证通过的 task/final pairs 放回 retained historical continuity。它不得调用 trusted constraint normalizer，不得把 persisted text 变成 current user input，也不得恢复旧 root/scoped project instructions。下一 Run 的 project instructions 必须重新从当前 Workspace State 加载。
+
 ---
 
 ## 19. ToolResult Projection
@@ -1986,28 +2000,29 @@ search_text
 
 ---
 
-## 52. v1 Memory Boundary
+## 52. Memory and Persistence Boundary
 
-v1 Memory只存在于：
+Memory只存在于：
 
 ```text
 active process
 current Session
 current / retained Runs
+explicit terminal-safe completed-run checkpoint
 ```
 
 不提供：
 
 ```text
-cross-process resume
-persistent conversation memory
+unfinished Run resume
+arbitrary persistent conversation memory
 vector database
 embedding retrieval
 long-term user memory
 semantic workspace index
 ```
 
-程序结束后，不承诺恢复 Context。
+程序结束后，只有用户显式保存且通过 schema/workspace validation 的 bounded completed-run task/final continuity 可以恢复；其他 Context 与 Runtime state 一律不恢复。
 
 ---
 
@@ -2138,7 +2153,7 @@ Context-ranking model
 Tokenizer abstraction hierarchy
 VectorStore
 Embedding service
-Persistent Session store
+general persistent memory framework
 ```
 
 如果一个小型：
