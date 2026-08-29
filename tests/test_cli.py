@@ -24,7 +24,14 @@ from coding_agent.interaction import (
 )
 from coding_agent.model_client import FakeModelClient
 from coding_agent.model_client import FatalProviderError
-from coding_agent.protocol import ModelRequest, ModelResponse, ModelUsage, ToolCall, ToolOutcome
+from coding_agent.protocol import (
+    ModelRequest,
+    ModelResponse,
+    ModelUsage,
+    ProjectInstructionMessage,
+    ToolCall,
+    ToolOutcome,
+)
 from coding_agent.runtime import RunState, RuntimeEvent
 
 
@@ -177,6 +184,34 @@ def test_composition_root_registers_complete_v1_toolset(tmp_path: Path) -> None:
         "shell",
         "ask_user",
     ]
+
+
+def test_composition_loads_root_agents_for_each_run_and_redacts_secret(
+    tmp_path: Path,
+) -> None:
+    agents = tmp_path / "AGENTS.md"
+    agents.write_text("Use pytest. Secret=test-key", encoding="utf-8")
+    client = FakeModelClient(
+        [ModelResponse(text="First."), ModelResponse(text="Second.")]
+    )
+    runtime = build_runtime(
+        _config(tmp_path),
+        model_client=client,
+        user_interaction=FakeUserInteraction(),
+    )
+
+    assert runtime.run("First task").state is RunState.COMPLETED
+    agents.write_text("Use unittest.", encoding="utf-8")
+    assert runtime.run("Second task").state is RunState.COMPLETED
+
+    first_instruction = client.requests[0].messages[1]
+    second_instruction = client.requests[1].messages[1]
+    assert isinstance(first_instruction, ProjectInstructionMessage)
+    assert isinstance(second_instruction, ProjectInstructionMessage)
+    assert "Use pytest." in first_instruction.text
+    assert "test-key" not in first_instruction.text
+    assert "Use unittest." in second_instruction.text
+    assert "Use pytest." not in second_instruction.text
 
 
 def test_composition_uses_openai_compatible_client_by_default(

@@ -30,6 +30,7 @@ from .protocol import (
     ModelRequest,
     ModelResponse,
     ModelUsage,
+    ProjectInstructionMessage,
     RuntimeInstructionMessage,
     SystemMessage,
     ToolCall,
@@ -106,6 +107,8 @@ class OpenAICompatibleModelClient:
             if isinstance(message, SystemMessage):
                 wire.append({"role": "system", "content": message.text})
             elif isinstance(message, UserMessage):
+                wire.append({"role": "user", "content": message.text})
+            elif isinstance(message, ProjectInstructionMessage):
                 wire.append({"role": "user", "content": message.text})
             elif isinstance(message, RuntimeInstructionMessage):
                 wire.append({"role": "user", "content": message.text})

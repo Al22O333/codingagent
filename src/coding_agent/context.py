@@ -5,11 +5,13 @@ from __future__ import annotations
 from .protocol import (
     AssistantMessage,
     InternalMessage,
+    ProjectInstructionMessage,
     RuntimeInstructionMessage,
     SystemMessage,
     ToolResultMessage,
     UserMessage,
 )
+from .project_instructions import RootProjectInstructions
 from .prompt import COMPLETION_AUDIT_INSTRUCTION, build_system_prefix
 from .projection import project_tool_result_message
 
@@ -30,6 +32,7 @@ class ContextManager:
         *,
         max_context_chars: int = 256_000,
         max_retained_completed_runs: int = 1,
+        root_project_instructions: RootProjectInstructions | None = None,
     ) -> None:
         if max_context_chars <= 0:
             raise ValueError("max_context_chars must be positive")
@@ -37,12 +40,14 @@ class ContextManager:
             raise ValueError("max_retained_completed_runs must not be negative")
         self._max_context_chars = max_context_chars
         self._max_retained_completed_runs = max_retained_completed_runs
+        self._root_project_instructions = root_project_instructions
         self._completed_run_continuity: list[tuple[InternalMessage, ...]] = []
         self._messages: list[InternalMessage] = []
         self._pending_tool_calls: dict[str, str] = {}
         self._pending_candidate: AssistantMessage | None = None
         self._run_active = False
         self._history_incomplete = False
+        self._project_instruction: ProjectInstructionMessage | None = None
 
     @property
     def history_incomplete(self) -> bool:
@@ -56,6 +61,11 @@ class ContextManager:
         self._pending_tool_calls.clear()
         self._pending_candidate = None
         self._messages = [message]
+        self._project_instruction = (
+            self._root_project_instructions.load()
+            if self._root_project_instructions is not None
+            else None
+        )
         self._run_active = True
         self._history_incomplete = False
 
@@ -71,6 +81,7 @@ class ContextManager:
         if self._max_retained_completed_runs == 0:
             self._completed_run_continuity.clear()
         self._messages.clear()
+        self._project_instruction = None
         self._pending_tool_calls.clear()
         self._pending_candidate = None
         self._run_active = False
@@ -208,9 +219,14 @@ class ContextManager:
             completion_audit_active=completion_audit_active,
             corrective_instruction=corrective_instruction,
         )
+        project_instructions = (
+            (self._project_instruction,)
+            if self._project_instruction is not None
+            else ()
+        )
         previously_incomplete = self._history_incomplete
         messages_with_request_instructions = self._build_bounded_messages(
-            (prefix, *tail_instructions),
+            (prefix, *project_instructions, *tail_instructions),
             project_tool_results=True,
         )
         if not previously_incomplete and self._history_incomplete:
@@ -221,12 +237,17 @@ class ContextManager:
                 corrective_instruction=corrective_instruction,
             )
             messages_with_request_instructions = self._build_bounded_messages(
-                (prefix, *tail_instructions),
+                (prefix, *project_instructions, *tail_instructions),
                 project_tool_results=True,
             )
-        instruction_count = 1 + len(tail_instructions)
+        instruction_count = 1 + len(project_instructions) + len(tail_instructions)
         retained_history = messages_with_request_instructions[:-instruction_count]
-        return (prefix, *retained_history, *tail_instructions)
+        return (
+            prefix,
+            *project_instructions,
+            *retained_history,
+            *tail_instructions,
+        )
 
     @staticmethod
     def _tail_instructions(

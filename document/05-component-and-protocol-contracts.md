@@ -510,6 +510,8 @@ SystemMessage(text)
 
 UserMessage(text)
 
+ProjectInstructionMessage(text)
+
 RuntimeInstructionMessage(text)
 
 AssistantMessage(
@@ -534,6 +536,8 @@ Tool Call(s)
 其中 text 在存在 Tool Call 时仅属于当前 action commentary，不是 Final Response。
 
 `provider_reasoning_content` 是一个可选、internal-only 的 provider continuation field。它只用于满足 concrete ModelClient 在同一 Agent Run 内继续对话时的协议回放要求；它不是普通 assistant text，不得展示给用户、写入日志、进入 Tool argument / ToolResult，或进入 completed-run continuity。v1 只定义这一条窄字段，不建立通用 raw provider metadata 容器。
+
+`ProjectInstructionMessage` 是 07 定义的 current-Run、request-local、untrusted root `AGENTS.md` guidance。它不代表用户输入，不进入 trusted task-constraint update path、Conversation History 或 completed-run continuity。OpenAI-compatible ModelClient 将它映射为带有明确 provenance / priority wrapper 的 wire `user` role；内部类型区分必须始终保留，不能把它重新构造成 `UserMessage`、`SystemMessage` 或 `RuntimeInstructionMessage`。
 
 `RuntimeInstructionMessage` 是 Runtime 合成的 request-local control message，不代表用户输入，不写入 Conversation History，不进入 trusted task-constraint update path。OpenAI-compatible ModelClient 可将它映射为带有明确 `not user-authored` 标记的 wire `user` role，以便在 Assistant Candidate 后形成 provider 能可靠响应的新一轮；内部类型区分必须始终保留，不能把它重新构造成 `UserMessage`。
 

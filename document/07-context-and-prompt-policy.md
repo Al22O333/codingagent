@@ -248,6 +248,58 @@ an action or successful verification that was not actually observed.
 
 ---
 
+### 4.4 Root `AGENTS.md` Project Instructions
+
+v1 支持一个正式、单一的 project instruction source：
+
+```text
+<workspace-root>/AGENTS.md
+```
+
+首版只支持 root file，不递归扫描、不解析 nested scope、不建立 glob / rule engine，也不兼容其他 instruction filename。它是 ordinary project guidance 的显式入口，可以说明 test command、coding convention、compatibility rule、generated-directory guidance、architecture note 与普通 project workflow；它不是 Runtime hard constraint、System safety override、permission override、persistent memory 或通用 InstructionManager。
+
+每个 Agent Run 开始时，Runtime composition 所绑定的 root instruction source 必须根据当前 workspace truth 重新读取一次。该 snapshot 只对当前 Run 有效：不进入 completed-run continuity，不跨进程持久化，Run 结束即丢弃。文件不存在、不是 regular text file、不是有效 UTF-8、解析失败或安全验证失败时，不产生 project-instruction message，行为完全退化为没有该能力时的旧行为。
+
+读取必须复用 06 owning 的 canonical workspace path resolver，并满足：
+
+* 只尝试精确 root `AGENTS.md`，不因内容引用而自动读取其他文件；
+* resolved target 必须仍在 workspace 内；
+* resolved target 不得是 Sensitive Path 或 Protected Path；
+* symlink / junction 不能绕过 containment 或 Sensitive / Protected classification；
+* 内容使用固定 byte bound；超限只保留 UTF-8-safe prefix并显式标记 truncation；
+* NUL / invalid UTF-8 不作为 instructions 进入模型；
+* 与已知 Runtime Secret 完全相同的值在进入 Context 前 deterministic redaction。
+
+Project instructions 使用 provider-neutral `ProjectInstructionMessage` 表示。它在 provider wire 上使用 ordinary `user` role，但拥有独立 internal type，以免被误认为用户当前输入、Runtime control instruction 或 completed-run continuity。每次 request 的顺序为：
+
+```text
+Base System Prompt
+→ current-Run ProjectInstructionMessage（如果存在）
+→ retained completed-run continuity
+→ current User Task and Run history
+→ required tail Runtime instructions
+```
+
+message wrapper 必须明确其来源与下列优先级：
+
+```text
+Runtime fixed safety / permission policy
+>
+current normalized explicit hard constraints
+>
+current user task, trusted clarifications and semantic scope
+>
+applicable project instructions
+>
+ordinary workspace content
+>
+historical continuity
+```
+
+因此 project instructions 不能授权 workspace escape、Sensitive / Protected Path bypass、Secret access、permission bypass、Git remote mutation、system / privilege action，也不能解除、扩大或绕过当前 Runtime constraint state。只有 trusted user input 可以更新 explicit constraints。该优先级由 Runtime enforcement 与明确 message provenance 共同表达；不能仅依赖项目文本自称拥有更高 authority。
+
+---
+
 ## 5. What the Base Prompt Does Not Own
 
 Base Prompt 不复制以下 Runtime contract：

@@ -28,6 +28,7 @@ from .interaction import (
 from .model_client import ModelClient
 from .openai_client import OpenAICompatibleConfig, OpenAICompatibleModelClient
 from .policy import PolicyEngine
+from .project_instructions import RootProjectInstructions
 from .read_file import ReadFileTool
 from .runtime import (
     AgentRuntime,
@@ -211,7 +212,13 @@ def build_runtime(
     )
     return AgentRuntime(
         concrete_model_client,
-        ContextManager(max_context_chars=config.max_context_chars),
+        ContextManager(
+            max_context_chars=config.max_context_chars,
+            root_project_instructions=RootProjectInstructions(
+                resolver,
+                runtime_secret_values=(config.api_key,),
+            ),
+        ),
         registry,
         RuntimeLimits(
             max_model_turns=config.max_model_turns,
