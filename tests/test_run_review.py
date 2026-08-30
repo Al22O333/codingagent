@@ -25,6 +25,7 @@ from coding_agent.runtime import (
 from coding_agent.workspace_awareness import (
     WorkspaceAwarenessState,
     WorkspaceChangeFacts,
+    WorkspaceSnapshot,
 )
 
 
@@ -246,6 +247,15 @@ def test_json_review_flag_is_wired_without_changing_default_schema(
         lambda config: FakeModelClient([ModelResponse(text="Read-only result.")]),
     )
 
+    class NotGitObserver:
+        def __init__(self, _workspace: Path) -> None:
+            pass
+
+        def snapshot(self) -> WorkspaceSnapshot:
+            return WorkspaceSnapshot(WorkspaceAwarenessState.NOT_GIT)
+
+    monkeypatch.setattr(cli, "GitWorkspaceChangeObserver", NotGitObserver)
+
     exit_code = cli.main(
         ["--workspace", str(tmp_path), "--json", "--review", "inspect"]
     )
@@ -254,4 +264,4 @@ def test_json_review_flag_is_wired_without_changing_default_schema(
     assert exit_code == 0
     assert document["review"]["command_evidence"] == []
     assert document["review"]["verification_sufficiency"] == "NOT_INFERRED"
-    assert document["review"]["workspace_changes"]["awareness_state"] == "UNAVAILABLE"
+    assert document["review"]["workspace_changes"]["awareness_state"] == "NOT_GIT"

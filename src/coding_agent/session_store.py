@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+from heapq import nsmallest
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import NoReturn
+from typing import Iterator, NoReturn
 from uuid import UUID, uuid4
 
 from .context import CompletedRunContinuity
@@ -17,6 +18,8 @@ SESSION_SCHEMA_VERSION = 1
 MAX_RETAINED_COMPLETED_RUNS = 1
 MAX_CONTINUITY_FIELD_CHARS = 12_000
 MAX_SESSION_DOCUMENT_BYTES = 96 * 1024
+MAX_SESSION_SCAN = 256
+MAX_SESSION_RESULTS = 100
 _TRUNCATION_MARKER = "\n[terminal-safe continuity truncated]\n"
 _REDACTION = "<redacted>"
 
@@ -55,6 +58,7 @@ class SessionListing:
     workspace_identity: str
     sessions: tuple[SessionSummary, ...]
     skipped_invalid_entries: int
+    truncated: bool
 
 
 class SessionStore:
@@ -167,13 +171,31 @@ class SessionStore:
 
         workspace_identity = canonical_workspace_identity(workspace)
         if not self._root.exists():
-            return SessionListing(workspace_identity, (), 0)
+            return SessionListing(workspace_identity, (), 0, False)
         if not self._root.is_dir():
             raise SessionStoreError(
                 "SESSION_LIST_FAILED", "session directory is not a directory"
             )
+        eligible_candidate_count = 0
+
+        def eligible_candidates() -> Iterator[Path]:
+            nonlocal eligible_candidate_count
+            for candidate in self._root.iterdir():
+                if candidate.suffix != ".json":
+                    continue
+                try:
+                    canonical_session_id(candidate.stem)
+                except SessionStoreError:
+                    continue
+                eligible_candidate_count += 1
+                yield candidate
+
         try:
-            candidates = sorted(self._root.iterdir(), key=lambda path: path.name)
+            candidates = nsmallest(
+                MAX_SESSION_SCAN,
+                eligible_candidates(),
+                key=lambda path: path.name,
+            )
         except OSError as error:
             raise SessionStoreError(
                 "SESSION_LIST_FAILED", "session directory could not be read"
@@ -182,13 +204,7 @@ class SessionStore:
         summaries: list[SessionSummary] = []
         skipped_invalid_entries = 0
         for candidate in candidates:
-            if candidate.suffix != ".json":
-                continue
             candidate_id = candidate.stem
-            try:
-                canonical_session_id(candidate_id)
-            except SessionStoreError:
-                continue
             try:
                 checkpoint = self.load(candidate_id, workspace)
             except SessionStoreError as error:
@@ -206,10 +222,12 @@ class SessionStore:
         summaries.sort(
             key=lambda summary: (summary.updated_at, summary.session_id), reverse=True
         )
+        result_truncated = len(summaries) > MAX_SESSION_RESULTS
         return SessionListing(
             workspace_identity,
-            tuple(summaries),
+            tuple(summaries[:MAX_SESSION_RESULTS]),
             skipped_invalid_entries,
+            eligible_candidate_count > MAX_SESSION_SCAN or result_truncated,
         )
 
     def delete(self, session_id: str, workspace: Path) -> SessionCheckpoint:
@@ -355,6 +373,8 @@ def _corrupt(message: str) -> NoReturn:
 __all__ = [
     "MAX_CONTINUITY_FIELD_CHARS",
     "MAX_SESSION_DOCUMENT_BYTES",
+    "MAX_SESSION_RESULTS",
+    "MAX_SESSION_SCAN",
     "SESSION_SCHEMA_VERSION",
     "SessionCheckpoint",
     "SessionListing",

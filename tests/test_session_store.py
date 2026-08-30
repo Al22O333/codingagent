@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterator
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
 
+import coding_agent.session_store as session_store_module
 from coding_agent.context import CompletedRunContinuity
 from coding_agent.session_store import (
     MAX_CONTINUITY_FIELD_CHARS,
@@ -210,6 +212,7 @@ def test_listing_is_workspace_scoped_metadata_only_and_tolerates_bad_entries(
     assert other_id not in repr(listing)
     assert "private task" not in repr(listing)
     assert listing.skipped_invalid_entries == 1
+    assert listing.truncated is False
 
 
 def test_listing_missing_directory_is_empty_and_invalid_directory_is_rejected(
@@ -223,11 +226,51 @@ def test_listing_missing_directory_is_empty_and_invalid_directory_is_rejected(
 
     assert listing.sessions == ()
     assert listing.skipped_invalid_entries == 0
+    assert listing.truncated is False
 
     root.write_text("not a directory", encoding="utf-8")
     with pytest.raises(SessionStoreError) as raised:
         SessionStore(root).list_summaries(workspace)
     assert raised.value.code == "SESSION_LIST_FAILED"
+
+
+def test_listing_scan_and_results_are_bounded_and_order_independent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    root = tmp_path / "sessions"
+    store = SessionStore(root)
+    session_ids = [
+        f"00000000-0000-4000-8000-{index:012d}" for index in range(1, 6)
+    ]
+    for session_id in session_ids:
+        store.save(
+            session_id=session_id,
+            workspace=workspace,
+            continuity=(_record(session_id, "bounded final"),),
+        )
+    monkeypatch.setattr(session_store_module, "MAX_SESSION_SCAN", 3)
+    monkeypatch.setattr(session_store_module, "MAX_SESSION_RESULTS", 2)
+
+    natural = store.list_summaries(workspace)
+    original_iterdir = Path.iterdir
+
+    def reverse_root_iterdir(path: Path) -> Iterator[Path]:
+        entries = list(original_iterdir(path))
+        return iter(reversed(entries)) if path == root else iter(entries)
+
+    monkeypatch.setattr(Path, "iterdir", reverse_root_iterdir)
+    reversed_listing = store.list_summaries(workspace)
+
+    natural_ids = [summary.session_id for summary in natural.sessions]
+    reversed_ids = [summary.session_id for summary in reversed_listing.sessions]
+    assert natural_ids == reversed_ids
+    assert len(natural_ids) == 2
+    assert set(natural_ids).issubset(set(session_ids[:3]))
+    assert natural.truncated is True
+    assert reversed_listing.truncated is True
 
 
 def test_delete_requires_exact_id_and_matching_workspace(tmp_path: Path) -> None:

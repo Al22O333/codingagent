@@ -71,6 +71,36 @@ _MAX_SHELL_TIMEOUT_SECONDS = 5 * 60
 _MAX_REVIEW_PATHS = 50
 
 
+class _MachineUsageError(ValueError):
+    """An argparse usage failure that must be projected as machine output."""
+
+
+class _CLIArgumentParser(argparse.ArgumentParser):
+    """Keep normal argparse UX while allowing machine-safe usage failures."""
+
+    def __init__(self, *args: object, machine_errors: bool = False, **kwargs: object) -> None:
+        self._machine_errors = machine_errors
+        super().__init__(*args, **kwargs)
+
+    def error(self, message: str) -> None:
+        if self._machine_errors:
+            raise _MachineUsageError(message)
+        super().error(message)
+
+
+def _machine_output_intent(argv: Sequence[str]) -> str | None:
+    """Detect only explicit machine flags; argparse still owns all parsing."""
+
+    for argument in argv:
+        if argument == "--":
+            break
+        if argument == "--jsonl" or argument.startswith("--jsonl="):
+            return "jsonl"
+        if argument == "--json" or argument.startswith("--json="):
+            return "json"
+    return None
+
+
 def _platform_shell_executable() -> str:
     if os.name == "nt":
         return os.environ["COMSPEC"]
@@ -705,8 +735,10 @@ def _bounded_head_tail(value: str, limit: int) -> str:
     return value[:head] + marker + (value[-tail:] if tail else "")
 
 
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="coding-agent")
+def _parser(*, machine_errors: bool = False) -> argparse.ArgumentParser:
+    parser = _CLIArgumentParser(
+        prog="coding-agent", machine_errors=machine_errors
+    )
     parser.add_argument(
         "--workspace",
         required=True,
@@ -771,12 +803,23 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run one task or a minimal multi-Run interactive Session."""
-    args = _parser().parse_args(argv)
+    raw_argv = tuple(sys.argv[1:] if argv is None else argv)
+    machine_intent = _machine_output_intent(raw_argv)
     startup_secret_values = tuple(
         value
         for name in _DEFAULT_SECRET_ENVIRONMENT_NAMES
         if (value := os.environ.get(name))
     )
+    try:
+        args = _parser(machine_errors=machine_intent is not None).parse_args(raw_argv)
+    except _MachineUsageError as error:
+        message = _redact_values(str(error), startup_secret_values)
+        document = _startup_failure_document("CLI_USAGE_ERROR", message)
+        if machine_intent == "jsonl":
+            _JsonlEventStream(sys.stdout, startup_secret_values).write_result(document)
+        else:
+            _write_json_document(document, sys.stdout)
+        return 2
     jsonl_stream = (
         _JsonlEventStream(sys.stdout, startup_secret_values)
         if args.jsonl
@@ -987,6 +1030,7 @@ def _run_session_management(
                             for summary in listing.sessions
                         ],
                         "skipped_invalid_entries": listing.skipped_invalid_entries,
+                        "truncated": listing.truncated,
                     },
                     sys.stdout,
                 )
@@ -1005,6 +1049,8 @@ def _run_session_management(
                         "Skipped invalid session entries: "
                         f"{listing.skipped_invalid_entries}"
                     )
+                if listing.truncated:
+                    print("Session listing was truncated at the bounded scan/result limit.")
             return 0
 
         assert delete_session is not None

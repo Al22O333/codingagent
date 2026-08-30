@@ -140,6 +140,83 @@ def test_jsonl_usage_failures_are_one_terminal_result_line(
     assert document["result"]["normalized_error"]["code"] == expected_code
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--jsonl"],
+        ["--workspace", ".", "--jsonl", "--max-turns", "not-an-int", "inspect"],
+        ["--workspace", ".", "--jsonl", "--unknown-option", "inspect"],
+        ["--workspace", ".", "--jsonl", "--max-turns"],
+        [
+            "--workspace",
+            ".",
+            "--jsonl",
+            "--persist-session",
+            "--resume",
+            "00000000-0000-0000-0000-000000000000",
+            "inspect",
+        ],
+        ["--workspace", ".", "--jsonl", "--json", "--non-interactive", "inspect"],
+    ],
+)
+def test_jsonl_argparse_failures_are_one_terminal_result(
+    arguments: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secret = "jsonl-usage-secret"
+    monkeypatch.setenv("CODING_AGENT_API_KEY", secret)
+    invocation = [
+        f"--unknown={secret}" if argument == "--unknown-option" else argument
+        for argument in arguments
+    ]
+
+    exit_code = cli.main(invocation)
+    captured = capsys.readouterr()
+    lines = captured.out.splitlines()
+    document = json.loads(lines[0])
+
+    assert exit_code == 2
+    assert len(lines) == 1
+    assert captured.err == ""
+    assert document["type"] == "result"
+    assert document["sequence"] == 1
+    assert document["result"]["lifecycle_state"] == "STARTUP_FAILED"
+    assert document["result"]["normalized_error"]["code"] == "CLI_USAGE_ERROR"
+    assert secret not in captured.out
+
+
+def test_jsonl_startup_config_failure_is_one_terminal_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _configure(monkeypatch)
+
+    exit_code = cli.main(
+        [
+            "--workspace",
+            str(tmp_path),
+            "--jsonl",
+            "--non-interactive",
+            "--max-turns",
+            "0",
+            "inspect",
+        ]
+    )
+    captured = capsys.readouterr()
+    lines = captured.out.splitlines()
+    document = json.loads(lines[0])
+
+    assert exit_code == 2
+    assert len(lines) == 1
+    assert captured.err == ""
+    assert document["type"] == "result"
+    assert document["sequence"] == 1
+    assert document["result"]["lifecycle_state"] == "STARTUP_FAILED"
+    assert document["result"]["normalized_error"]["code"] == "STARTUP_FAILURE"
+
+
 def test_jsonl_noninteractive_required_interaction_is_terminal_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

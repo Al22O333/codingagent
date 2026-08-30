@@ -28,7 +28,9 @@ def _runtime(
     resolver: WorkspacePathResolver | None = None,
     limits: RuntimeLimits = LIMITS,
     context: ContextManager | None = None,
+    clock=None,  # type: ignore[no-untyped-def]
 ) -> AgentRuntime:
+    clock_arguments = {} if clock is None else {"clock": clock}
     return AgentRuntime(
         client,
         context or ContextManager(),
@@ -39,6 +41,7 @@ def _runtime(
         user_interaction=interaction or FakeUserInteraction(),
         sleep_fn=lambda _: None,
         observer=observer,
+        **clock_arguments,
     )
 
 
@@ -133,6 +136,42 @@ def test_observer_reports_policy_and_exact_permission_lifecycle(
     assert "permission_resolved" in kinds
     resolved = next(event for event in events if event.kind == "permission_resolved")
     assert resolved.facts["decision"] == "REJECT"
+
+
+def test_synchronous_observer_latency_counts_as_wall_clock_without_control(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".env").write_text("TOKEN=value", encoding="utf-8")
+    resolver = WorkspacePathResolver(tmp_path)
+    registry = ToolRegistry()
+    registry.register(ReadFileTool(resolver, max_lines=20, max_bytes=4_096))
+    events: list[RuntimeEvent] = []
+    current_time = [0.0]
+
+    def clock() -> float:
+        return current_time[0]
+
+    def slow_observer(event: RuntimeEvent) -> None:
+        events.append(event)
+        current_time[0] += 0.01
+
+    call = ToolCall("read-sensitive", "read_file", {"path": ".env"})
+    runtime = _runtime(
+        FakeModelClient([ModelResponse(None, (call,)), ModelResponse("Not read.")]),
+        slow_observer,
+        registry=registry,
+        resolver=resolver,
+        interaction=FakeUserInteraction((ConfirmationDecision.REJECT,)),
+        clock=clock,
+    )
+
+    run = runtime.run("Inspect the environment file")
+
+    assert run.state is RunState.COMPLETED
+    assert run.final_response == "Not read."
+    resolved = next(event for event in events if event.kind == "permission_resolved")
+    assert resolved.facts["decision"] == "REJECT"
+    assert run.active_duration_seconds >= 0.01
 
 
 def test_empty_file_observation_reports_zero_lines_and_run_continues(

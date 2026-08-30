@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import os
 import stat
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from pydantic import Field
 
@@ -56,6 +60,62 @@ class MovePathContent:
 class DeletePathContent:
     path: str
     entry_type: str
+
+
+class _NoReplaceUnavailableError(OSError):
+    """The host cannot provide an atomic no-replace rename primitive."""
+
+
+def _linux_rename_no_replace(source: Path, destination: Path) -> None:
+    """Use Linux renameat2 so destination creation can never be overwritten."""
+
+    try:
+        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+    except (AttributeError, OSError) as error:
+        raise _NoReplaceUnavailableError(
+            "Linux renameat2(RENAME_NOREPLACE) is unavailable"
+        ) from error
+    renameat2.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        -100,  # AT_FDCWD
+        os.fsencode(source),
+        -100,
+        os.fsencode(destination),
+        1,  # RENAME_NOREPLACE
+    )
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    unsupported_errors = {errno.ENOSYS, errno.EINVAL}
+    if hasattr(errno, "EOPNOTSUPP"):
+        unsupported_errors.add(errno.EOPNOTSUPP)
+    if error_number in unsupported_errors:
+        raise _NoReplaceUnavailableError(
+            "Linux renameat2(RENAME_NOREPLACE) is unsupported"
+        )
+    raise OSError(error_number, os.strerror(error_number), str(destination))
+
+
+def _rename_no_replace(source: Path, destination: Path) -> None:
+    """Atomically rename without replacement, or fail closed on this host."""
+
+    if os.name == "nt":
+        # Windows MoveFile semantics used by os.rename fail if destination exists.
+        os.rename(source, destination)
+        return
+    if sys.platform.startswith("linux"):
+        _linux_rename_no_replace(source, destination)
+        return
+    raise _NoReplaceUnavailableError(
+        f"atomic no-replace rename is unavailable on {sys.platform}"
+    )
 
 
 class CreateDirectoryTool(Tool[CreateDirectoryArguments]):
@@ -224,21 +284,28 @@ class CreateDirectoryTool(Tool[CreateDirectoryArguments]):
 class MovePathTool(Tool[MovePathArguments]):
     """Move or rename one regular file or directory without overwrite."""
 
-    __slots__ = ("_resolver",)
+    __slots__ = ("_rename_no_replace", "_resolver")
 
-    def __init__(self, resolver: WorkspacePathResolver) -> None:
+    def __init__(
+        self,
+        resolver: WorkspacePathResolver,
+        *,
+        rename_no_replace: Callable[[Path, Path], None] = _rename_no_replace,
+    ) -> None:
         super().__init__(
             name="move_path",
             description=(
                 "Move or rename one regular file or directory inside the "
                 "workspace; source and destination are both constrained and "
-                "the destination must not exist"
+                "the destination must not exist. Use this Tool rather than "
+                "create plus delete when relocating an existing path"
             ),
             argument_model=MovePathArguments,
             kind=ToolKind.LOCAL,
             capabilities=frozenset({ToolCapability.FILE_MUTATION}),
         )
         object.__setattr__(self, "_resolver", resolver)
+        object.__setattr__(self, "_rename_no_replace", rename_no_replace)
 
     def prepare(
         self,
@@ -387,7 +454,24 @@ class MovePathTool(Tool[MovePathArguments]):
         if entry_type is None:
             return _failure("UNSUPPORTED_FILE_TYPE", "move_path source type changed", source=arguments.source)
         try:
-            os.rename(current_source.resolved_path, current_destination.resolved_path)
+            self._rename_no_replace(
+                current_source.resolved_path, current_destination.resolved_path
+            )
+        except _NoReplaceUnavailableError as error:
+            return _failure(
+                "MOVE_NO_REPLACE_UNAVAILABLE",
+                "move_path cannot guarantee no-overwrite semantics on this platform",
+                source=arguments.source,
+                destination=arguments.destination,
+                reason=type(error).__name__,
+            )
+        except FileNotFoundError:
+            return _failure(
+                "MOVE_CONFLICT",
+                "move_path source or destination parent disappeared",
+                source=arguments.source,
+                destination=arguments.destination,
+            )
         except (FileExistsError, IsADirectoryError, NotADirectoryError):
             return _failure("DESTINATION_ALREADY_EXISTS", "move_path destination appeared before execution", destination=arguments.destination)
         except OSError as error:

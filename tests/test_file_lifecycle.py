@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import errno
+import os
+import sys
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
+import coding_agent.file_lifecycle as file_lifecycle_module
 from coding_agent.file_lifecycle import (
     CreateDirectoryArguments,
     CreateDirectoryTool,
@@ -12,6 +16,9 @@ from coding_agent.file_lifecycle import (
     DeletePathTool,
     MovePathArguments,
     MovePathTool,
+    _NoReplaceUnavailableError,
+    _linux_rename_no_replace,
+    _rename_no_replace,
 )
 from coding_agent.policy import PermissionDecision, PolicyEngine
 from coding_agent.protocol import ToolCapability, ToolError, ToolKind, ToolOutcome
@@ -60,6 +67,7 @@ def test_lifecycle_tools_are_typed_local_file_mutations(tmp_path: Path) -> None:
         for tool in tools
     )
     assert "recursive" in tools[2].spec.description
+    assert "rather than create plus delete" in tools[1].spec.description
 
 
 def test_create_directory_creates_one_level_and_reports_summary(tmp_path: Path) -> None:
@@ -181,7 +189,7 @@ def test_move_path_existing_destination_is_never_overwritten(tmp_path: Path) -> 
     assert destination.read_text(encoding="utf-8") == "destination"
 
 
-def test_move_path_destination_race_is_non_destructive_on_windows(tmp_path: Path) -> None:
+def test_move_path_destination_before_execute_is_non_destructive(tmp_path: Path) -> None:
     source = tmp_path / "old.txt"
     destination = tmp_path / "new.txt"
     source.write_text("source", encoding="utf-8")
@@ -200,6 +208,213 @@ def test_move_path_destination_race_is_non_destructive_on_windows(tmp_path: Path
     assert result.error.code == "DESTINATION_ALREADY_EXISTS"
     assert source.read_text(encoding="utf-8") == "source"
     assert destination.read_text(encoding="utf-8") == "racer"
+
+
+def test_move_path_final_native_race_never_overwrites_destination(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "old.txt"
+    destination = tmp_path / "new.txt"
+    source.write_bytes(b"source")
+
+    def race_then_rename(current_source: Path, current_destination: Path) -> None:
+        current_destination.write_bytes(b"racer")
+        _rename_no_replace(current_source, current_destination)
+
+    tool = MovePathTool(
+        WorkspacePathResolver(tmp_path), rename_no_replace=race_then_rename
+    )
+    prepared = _prepared(
+        tool,
+        "move",
+        MovePathArguments(source="old.txt", destination="new.txt"),
+    )
+
+    result = tool.execute(prepared)
+
+    assert result.outcome is ToolOutcome.OPERATION_FAILURE
+    assert result.error is not None
+    assert result.error.code == "DESTINATION_ALREADY_EXISTS"
+    assert source.read_bytes() == b"source"
+    assert destination.read_bytes() == b"racer"
+
+
+def test_move_path_source_disappears_after_prepare(tmp_path: Path) -> None:
+    source = tmp_path / "old.txt"
+    source.write_text("source", encoding="utf-8")
+    tool = MovePathTool(WorkspacePathResolver(tmp_path))
+    prepared = _prepared(
+        tool,
+        "move",
+        MovePathArguments(source="old.txt", destination="new.txt"),
+    )
+    source.unlink()
+
+    result = tool.execute(prepared)
+
+    assert result.outcome is ToolOutcome.OPERATION_FAILURE
+    assert result.error is not None and result.error.code == "MOVE_CONFLICT"
+    assert not (tmp_path / "new.txt").exists()
+
+
+def test_move_path_source_disappears_in_final_native_window(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "old.txt"
+    source.write_text("source", encoding="utf-8")
+
+    def remove_then_rename(current_source: Path, current_destination: Path) -> None:
+        current_source.unlink()
+        _rename_no_replace(current_source, current_destination)
+
+    tool = MovePathTool(
+        WorkspacePathResolver(tmp_path), rename_no_replace=remove_then_rename
+    )
+    prepared = _prepared(
+        tool,
+        "move",
+        MovePathArguments(source="old.txt", destination="new.txt"),
+    )
+
+    result = tool.execute(prepared)
+
+    assert result.outcome is ToolOutcome.OPERATION_FAILURE
+    assert result.error is not None and result.error.code == "MOVE_CONFLICT"
+    assert not (tmp_path / "new.txt").exists()
+
+
+@pytest.mark.parametrize("destination_type", ["file", "directory"])
+def test_move_path_destination_type_appears_after_prepare(
+    tmp_path: Path,
+    destination_type: str,
+) -> None:
+    source = tmp_path / "old.txt"
+    destination = tmp_path / "new"
+    source.write_text("source", encoding="utf-8")
+    tool = MovePathTool(WorkspacePathResolver(tmp_path))
+    prepared = _prepared(
+        tool,
+        "move",
+        MovePathArguments(source="old.txt", destination="new"),
+    )
+    if destination_type == "file":
+        destination.write_text("racer", encoding="utf-8")
+    else:
+        destination.mkdir()
+
+    result = tool.execute(prepared)
+
+    assert result.outcome is ToolOutcome.OPERATION_FAILURE
+    assert result.error is not None
+    assert result.error.code == "DESTINATION_ALREADY_EXISTS"
+    assert source.read_text(encoding="utf-8") == "source"
+    if destination_type == "directory":
+        assert destination.is_dir()
+    else:
+        assert destination.read_text(encoding="utf-8") == "racer"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native rename semantics")
+def test_windows_native_rename_never_replaces_existing_destination(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.txt"
+    destination = tmp_path / "destination.txt"
+    source.write_bytes(b"source")
+    destination.write_bytes(b"destination")
+
+    with pytest.raises(FileExistsError):
+        _rename_no_replace(source, destination)
+
+    assert source.read_bytes() == b"source"
+    assert destination.read_bytes() == b"destination"
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux renameat2")
+def test_linux_native_renameat2_never_replaces_existing_destination(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.txt"
+    destination = tmp_path / "destination.txt"
+    source.write_bytes(b"source")
+    destination.write_bytes(b"destination")
+
+    with pytest.raises(FileExistsError):
+        _rename_no_replace(source, destination)
+
+    assert source.read_bytes() == b"source"
+    assert destination.read_bytes() == b"destination"
+
+
+def test_linux_no_replace_binding_maps_native_eexist_without_overwrite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[object, ...]] = []
+
+    class FakeRenameAt2:
+        argtypes: object = None
+        restype: object = None
+
+        def __call__(self, *arguments: object) -> int:
+            calls.append(arguments)
+            file_lifecycle_module.ctypes.set_errno(errno.EEXIST)
+            return -1
+
+    class FakeLibc:
+        renameat2 = FakeRenameAt2()
+
+    monkeypatch.setattr(
+        file_lifecycle_module.ctypes,
+        "CDLL",
+        lambda *_args, **_kwargs: FakeLibc(),
+    )
+
+    with pytest.raises(FileExistsError):
+        _linux_rename_no_replace(tmp_path / "source", tmp_path / "destination")
+
+    assert len(calls) == 1
+    assert calls[0][-1] == 1  # RENAME_NOREPLACE
+
+
+def test_platform_dispatch_fails_closed_without_supported_native_primitive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    monkeypatch.setattr(file_lifecycle_module.os, "name", "posix")
+    monkeypatch.setattr(file_lifecycle_module.sys, "platform", "darwin")
+
+    with pytest.raises(_NoReplaceUnavailableError):
+        _rename_no_replace(source, destination)
+
+
+def test_move_path_fails_closed_when_no_replace_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "old.txt"
+    source.write_text("source", encoding="utf-8")
+
+    def unavailable(_source: Path, _destination: Path) -> None:
+        raise _NoReplaceUnavailableError("unsupported test platform")
+
+    tool = MovePathTool(
+        WorkspacePathResolver(tmp_path), rename_no_replace=unavailable
+    )
+    prepared = _prepared(
+        tool,
+        "move",
+        MovePathArguments(source="old.txt", destination="new.txt"),
+    )
+
+    result = tool.execute(prepared)
+
+    assert result.outcome is ToolOutcome.OPERATION_FAILURE
+    assert result.error is not None
+    assert result.error.code == "MOVE_NO_REPLACE_UNAVAILABLE"
+    assert source.read_text(encoding="utf-8") == "source"
+    assert not (tmp_path / "new.txt").exists()
 
 
 def test_move_path_rejects_workspace_root_and_destination_inside_source(

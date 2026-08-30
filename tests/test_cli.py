@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from coding_agent import cli
+import coding_agent.session_store as session_store_module
 from coding_agent.cli import CLIConfig, ConsoleUserInteraction, build_runtime, load_config
 from coding_agent.context import CompletedRunContinuity
 from coding_agent.interaction import (
@@ -797,9 +798,45 @@ def test_session_list_is_model_free_workspace_scoped_json(
             }
         ],
         "skipped_invalid_entries": 0,
+        "truncated": False,
     }
     assert "private task" not in captured.out
     assert other_id not in captured.out
+
+
+def test_session_list_reports_bounded_truncation_in_machine_and_human_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    session_directory = tmp_path / "session-store"
+    store = SessionStore(session_directory)
+    for session_id in (
+        "10000000-0000-4000-8000-000000000001",
+        "20000000-0000-4000-8000-000000000002",
+    ):
+        store.save(
+            session_id=session_id,
+            workspace=workspace,
+            continuity=(CompletedRunContinuity("private", "private"),),
+        )
+    monkeypatch.setattr(session_store_module, "MAX_SESSION_SCAN", 1)
+    monkeypatch.setenv("CODING_AGENT_SESSION_DIR", str(session_directory))
+
+    machine_exit = cli.main(
+        ["--workspace", str(workspace), "--json", "--list-sessions"]
+    )
+    machine = json.loads(capsys.readouterr().out)
+    human_exit = cli.main(["--workspace", str(workspace), "--list-sessions"])
+    human = capsys.readouterr()
+
+    assert machine_exit == 0
+    assert machine["truncated"] is True
+    assert len(machine["sessions"]) == 1
+    assert human_exit == 0
+    assert "truncated" in human.out
 
 
 def test_session_delete_is_exact_model_free_and_missing_is_deterministic(
@@ -918,6 +955,106 @@ def test_json_startup_and_missing_task_failures_remain_machine_readable(
     assert missing_workspace["terminal_reason"] == "STARTUP_FAILURE"
     assert missing_workspace["normalized_error"]["code"] == "STARTUP_FAILURE"
     assert "Traceback" not in missing_workspace_capture.out
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--json"],
+        ["--workspace", ".", "--json", "--max-turns", "not-an-int", "inspect"],
+        ["--workspace", ".", "--json", "--unknown-option", "inspect"],
+        ["--workspace", ".", "--json", "--max-turns"],
+        ["--workspace", ".", "--json", "--jsonl", "--non-interactive", "inspect"],
+        [
+            "--workspace",
+            ".",
+            "--json",
+            "--persist-session",
+            "--resume",
+            "00000000-0000-0000-0000-000000000000",
+            "inspect",
+        ],
+    ],
+)
+def test_json_argparse_failures_are_one_machine_document(
+    arguments: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secret = "machine-usage-secret"
+    monkeypatch.setenv("CODING_AGENT_API_KEY", secret)
+    invocation = [
+        f"--unknown={secret}" if argument == "--unknown-option" else argument
+        for argument in arguments
+    ]
+
+    exit_code = cli.main(invocation)
+    captured = capsys.readouterr()
+    lines = captured.out.splitlines()
+    document = json.loads(lines[0])
+
+    assert exit_code == 2
+    assert len(lines) == 1
+    assert captured.err == ""
+    assert document["lifecycle_state"] == "STARTUP_FAILED"
+    assert document["normalized_error"]["code"] == "CLI_USAGE_ERROR"
+    assert secret not in captured.out
+
+
+def test_human_argparse_failure_and_help_keep_normal_behavior(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as failure:
+        cli.main(["--max-turns", "not-an-int"])
+    failed = capsys.readouterr()
+
+    assert failure.value.code == 2
+    assert failed.out == ""
+    assert "usage: coding-agent" in failed.err
+
+    with pytest.raises(SystemExit) as help_exit:
+        cli.main(["--help"])
+    helped = capsys.readouterr()
+
+    assert help_exit.value.code == 0
+    assert "usage: coding-agent" in helped.out
+    assert helped.err == ""
+
+    with pytest.raises(SystemExit) as machine_help_exit:
+        cli.main(["--json", "--help"])
+    machine_help = capsys.readouterr()
+
+    assert machine_help_exit.value.code == 0
+    assert "usage: coding-agent" in machine_help.out
+    assert machine_help.err == ""
+
+
+def test_json_startup_config_failure_is_one_machine_document(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _configure_main_environment(monkeypatch)
+
+    exit_code = cli.main(
+        [
+            "--workspace",
+            str(tmp_path),
+            "--json",
+            "--max-turns",
+            "0",
+            "inspect",
+        ]
+    )
+    captured = capsys.readouterr()
+    lines = captured.out.splitlines()
+    document = json.loads(lines[0])
+
+    assert exit_code == 2
+    assert len(lines) == 1
+    assert captured.err == ""
+    assert document["lifecycle_state"] == "STARTUP_FAILED"
+    assert document["normalized_error"]["code"] == "STARTUP_FAILURE"
 
 
 def test_noninteractive_json_never_reads_stdin_and_reports_clarification(
