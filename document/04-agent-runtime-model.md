@@ -42,7 +42,7 @@ v1 Runtime 遵循以下原则：
 
 ### 3.1 Session
 
-一个 Session 对应 Agent 进程中的一次连续交互环境。
+一个 Session 对应同一 workspace 中的一条连续交互线。它可以只存在于当前进程，也可以由 09 的显式 CLI 入口保存和恢复 terminal-safe continuity。
 
 Session 至少包含：
 
@@ -60,8 +60,9 @@ Session
 
 * 只绑定一个 workspace root
 * 可以依次执行多个 Agent Run
-* 在进程退出后不要求持久化
-* v1 不支持进程重启后的 Session resume
+* 默认仍只存在于当前进程
+* 只有用户显式请求 persistence 时，才保存 07 定义的 bounded completed-run continuity
+* resume 后创建全新的 Runtime execution state，不恢复任何 active Run 或 pending execution
 
 Session 本身不是一次具体任务的执行状态。
 
@@ -130,7 +131,7 @@ Workspace State 是项目事实来源。Conversation Context 中的文件内容�
 
 Runtime State 不复制整个 Workspace，也不保存全量文件镜像。它只保存驱动当前 Agent Run 和进程内 Session continuity 所需的结构化状态。
 
-v1 中的 Memory 仅指当前 Agent Run 或进程内 Session continuity 所需的结构化状态和保留信息，不包含跨进程 Persistent Memory、Vector Database、Embedding Memory 或长期用户记忆。
+本项目中的 Memory 仅指当前 Agent Run、进程内 Session continuity，或显式保存的 terminal-safe completed-run continuity；它不包含 Runtime snapshot、Vector Database、Embedding Memory 或长期用户记忆。
 
 Conversation Context 的具体保留、裁剪、摘要和 stale-context 处理由 07 定义。
 
@@ -193,6 +194,30 @@ Run #2 不应机械重新携带：
 Runtime 只规定：
 
 > **Session provides continuity; Agent Run provides execution isolation.**
+
+---
+
+### 4.3 Terminal-Safe Cross-Process Resume
+
+Persistent Session resume 只恢复 conversational continuity，不恢复 execution state。一个可恢复 checkpoint 只由最近 bounded 数量的 `COMPLETED` Run 的 initial task 与真实 Final 组成，并绑定 stable session ID、schema version 与 canonical workspace identity。
+
+同一个 Persistent Session UUID 的 concurrent multi-process mutation 不属于 v1 支持合同；一个 UUID 预期只有一个 active writer。Atomic checkpoint replacement 只保证单份 document 不半写，不提供跨进程序列化：并发 writer 可能 last-writer-wins。Management delete 只保证命令执行时删除 exact checkpoint，不终止或 revoke 已经 active 的 resumed process；该 process 后续完成时可能重新创建同一 UUID。
+
+新进程 resume 时必须：
+
+```text
+validate checkpoint + workspace identity
+→ create a fresh AgentRuntime / Session execution state
+→ restore bounded historical task/final continuity
+→ re-read current project instructions and workspace truth
+→ start a wholly new Agent Run from the new user task
+```
+
+不得持久化或恢复：pending ToolCall / ToolResult、PendingAction、permission、clarification、active process、candidate Final、completion-audit state、protocol correction、Runtime Secret、provider state、FAILED / CANCELLED Run 或任何 active budget/counter。Checkpoint write failure 不得损坏已有 checkpoint，也不得改变已经终止的 Run lifecycle；CLI 必须单独报告 persistence failure。
+
+Historical continuity 始终可能 stale。它不能创建当前 Run hard constraints，不能证明当前 Workspace State，也不能阻止模型按需重新读取文件和运行验证。
+
+Session listing 与 deletion 是 composition-root management operations，不是 Agent Run。它们不得构造 ModelClient、改变 Runtime lifecycle 或读取 continuity content；listing 只暴露当前 canonical workspace 下的 ID、更新时间与 retained completed-run count，deletion 只接受 exact canonical UUID 并再次验证 workspace binding。
 
 ---
 
@@ -585,12 +610,15 @@ Run 因 Runtime 无法合理继续而非正常结束。
 * invalid Runtime configuration discovered during run
 * internal invariant violation
 * `UserInteractionError` caused by a real terminal I/O infrastructure failure
+* an explicit non-interactive Run reaches a required clarification or exact-action permission boundary
 
 FAILED 应带明确的：
 
 ```text
 termination_reason
 ```
+
+Non-interactive input requirements use the distinct terminal reasons `CLARIFICATION_REQUIRED` and `PERMISSION_REQUIRED`; they are expected automation outcomes, not terminal I/O failures. Runtime must retain only bounded safe request facts for the terminal result, clear every pending action/request, and never execute or auto-approve the blocked action.
 
 ---
 
@@ -944,6 +972,52 @@ run_tests(...)
 不能让 Runtime 提前进入 `COMPLETED`。
 
 必须先完成 Tool Call，获得 observation，并继续 Agent Loop。
+
+---
+
+### 11.3 Conservative Git Workspace Change Awareness
+
+当 composition root 为 Runtime 提供 bound-workspace Git observer 时，每个 Run 在首个 Model request 前与 terminal cleanup 时各执行一次 bounded、read-only snapshot。该观察只允许直接调用 Git read commands；不执行 stash、reset、checkout、clean、add、commit 或任何 workspace mutation。
+
+首版只在：
+
+```text
+canonical Git top-level == canonical bound workspace root
+```
+
+时形成 Git facts。non-Git workspace、workspace 只是更大 repository 的子目录、Git unavailable、timeout 或 malformed output 都 normal degrade，不阻止 Run，也不猜测 workspace 外状态。
+
+terminal `WorkspaceChangeFacts` 最小包含：
+
+```text
+awareness_state
+pre_existing_dirty_paths
+known_agent_touched_paths
+new_or_other_dirty_paths
+attribution_uncertain
+truncated
+```
+
+所有 path 使用 workspace-relative bounded representation；每组最多保留 200 个 path，单个 path 与总 observer event 继续 bounded。语义为：
+
+* `pre_existing_dirty_paths` 来自 Run-start Git snapshot；
+* `known_agent_touched_paths` 只记录成功 structured `FILE_MUTATION` execution 的 declared affected paths；
+* `new_or_other_dirty_paths` 是 terminal dirty paths 中既不在 start snapshot、也不属于 known touched paths 的部分；
+* `attribution_uncertain` 在任一 Shell execution attempt、failed mutation execution、snapshot unavailable / truncated、pre-existing 与 touched path overlap、或 unexplained terminal dirty path 存在时为 true。
+
+这些是 conservative trust facts，不是内容级 provenance。尤其：
+
+```text
+known touched != exclusively authored by Agent
+new/other != proven authored by user or Agent
+clean terminal != no meaningful action occurred
+```
+
+Runtime 不解析 diff hunks来归因同一文件不同区域，不自动改写模型 Final，也不把 Git awareness变成 safety boundary。Snapshot / attribution failure不得改变 Tool permission、Run lifecycle 或 workspace内容；只影响 terminal facts和human observability。
+
+为支持显式 user review，`AgentRun` 还可以保留 bounded `CommandExecutionEvidence`：只记录实际进入 Shell `execute` boundary 的 command、workspace-relative cwd、normalized Tool outcome、exit code与 error code；已进入 execution但被用户中断的 attempt记录为 `INTERRUPTED / USER_CANCELLATION`。Validation failure、Policy deny/reject或尚待 permission 的 action不构成 execution evidence。Command evidence必须在存入 Run前进行 Runtime Secret redaction，不包含 stdout/stderr，最多保留32项、单项 command/cwd最多500字符，并以 truncation fact表示超限。它不进入跨进程 Session continuity。
+
+这些 facts 不推导 `verification_success`。Exit 0、test-like presentation label或多条 command evidence都不能让 Runtime声称 verification充分；08的 evidence/claim discipline仍由模型负责。
 
 ---
 
@@ -1784,7 +1858,7 @@ v1 应保持以下运行时不变量：
 21. Ctrl+C 属于用户取消，最终状态为 `CANCELLED`。
 22. Agent 可以在无法完成任务时如实产生 Final Response，而不是必须声称成功。
 23. Conversation Context 与实际 Workspace State 冲突时，以 local filesystem / environment 为事实来源。
-24. v1 Memory 不包含跨进程 Persistent Memory、Vector Database、Embedding Memory 或长期用户记忆。
+24. terminal-safe resume只允许显式保存 bounded completed-run continuity；Memory 不包含任意 Runtime snapshot、Vector Database、Embedding Memory 或长期用户记忆。
 25. `WAITING_FOR_USER` 不计入 active run duration；独立的用户等待超时由 09 决定。
 26. 每个进入处理 pipeline 的 Tool Call 都消耗一次 Tool Call Attempt；batch 终止后未处理的 calls 不计 attempt。
 27. Batch 遇到 validation error、policy rejection、Tool Operation Failure、Unsuccessful Command Outcome 或用户交互后 fail-stop，由新的 Model Turn 重新决策。
@@ -1796,6 +1870,9 @@ v1 应保持以下运行时不变量：
 33. 每个 eligible Run 最多进入一次 bounded same-model completion self-audit；audit 中的 Tool Turns 继续使用原 Agent Loop、预算、约束、权限与 cancellation semantics。
 34. Self-audit active 后的下一个合法无 Tool 文本可以成为真正 Final；completion self-audit happened 不等于 verification succeeded，`COMPLETED` 仍不等于 task success。
 35. Candidate、internal provider reasoning continuation、audit flags 和 pending audit state 必须在 Run terminal cleanup 中清除，不得进入下一 Run 的 transient state。
+36. Optional Git workspace awareness 只执行 bounded read-only snapshot；non-Git、root mismatch或observer failure不得阻止Run。
+37. 只有成功 structured File Mutation 的affected paths属于known touched；Shell和失败mutation只增加attribution uncertainty，不产生虚假精确归因。
+38. Runtime不得stash、reset、checkout、clean、commit用户workspace，也不得用change awareness改写模型Final。
 
 ---
 

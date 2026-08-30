@@ -13,7 +13,7 @@ from .constraints import (
 from .protocol import ToolCapability
 from .shell import ShellOperationFacts, ShellRiskAction
 from .tooling import PreparedToolCall
-from .workspace import FileOperationFacts
+from .workspace import FileOperationFacts, FileOperationKind
 
 
 class PermissionDecision(StrEnum):
@@ -107,8 +107,9 @@ class PolicyEngine:
         facts: FileOperationFacts,
     ) -> PermissionCheckResult:
         target = facts.target
+        affected_paths = facts.affected_paths or (target,)
         capabilities = prepared_call.tool_identity.capabilities
-        if not target.is_within_workspace:
+        if any(not path.is_within_workspace for path in affected_paths):
             return PolicyEngine._result(
                 PermissionDecision.DENY,
                 "WORKSPACE_BOUNDARY",
@@ -116,7 +117,10 @@ class PolicyEngine:
                 "Target resolves outside the bound workspace",
                 ("WORKSPACE_BOUNDARY",),
             )
-        if target.is_protected and ToolCapability.FILE_MUTATION in capabilities:
+        if (
+            any(path.is_protected for path in affected_paths)
+            and ToolCapability.FILE_MUTATION in capabilities
+        ):
             return PolicyEngine._result(
                 PermissionDecision.DENY,
                 "PROTECTED_PATH_MUTATION",
@@ -124,13 +128,31 @@ class PolicyEngine:
                 "Target is inside protected .git internals",
                 ("PROTECTED_PATH", "FILE_MUTATION"),
             )
-        if target.is_sensitive:
+        if facts.operation is FileOperationKind.DELETE and (
+            target.workspace_relative_path == "." or facts.directory_nonempty
+        ):
+            return PolicyEngine._result(
+                PermissionDecision.DENY,
+                "RECURSIVE_DELETE_DENIED",
+                "delete_path cannot delete the workspace root or a non-empty directory",
+                "Recursive or workspace-root deletion is outside the Tool contract",
+                ("FILE_MUTATION", "DELETE", "RECURSIVE_DELETE_DENIED"),
+            )
+        if any(path.is_sensitive for path in affected_paths):
             return PolicyEngine._result(
                 PermissionDecision.CONFIRM,
                 "SENSITIVE_PATH_CONFIRMATION",
                 "Sensitive Path access requires explicit user confirmation",
                 "Sensitive content may be read, created, or modified",
                 ("SENSITIVE_PATH",),
+            )
+        if facts.operation is FileOperationKind.DELETE:
+            return PolicyEngine._result(
+                PermissionDecision.CONFIRM,
+                "FILE_DELETE_CONFIRMATION",
+                "Deleting this exact path requires explicit user confirmation",
+                "One regular file or empty directory will be removed",
+                ("FILE_MUTATION", "DELETE"),
             )
         if target.is_protected and ToolCapability.FILE_READ in capabilities:
             return PolicyEngine._result(

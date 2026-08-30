@@ -16,7 +16,16 @@ from coding_agent.constraints import (
 from coding_agent.create_file import CreateFileTool
 from coding_agent.context import ContextManager
 from coding_agent.interaction import FakeUserInteraction
-from coding_agent.edit_file import EditFileArguments, EditFileTool
+from coding_agent.edit_file import (
+    ApplyEditsTool,
+    EditFileArguments,
+    EditFileTool,
+)
+from coding_agent.file_lifecycle import (
+    CreateDirectoryTool,
+    DeletePathTool,
+    MovePathTool,
+)
 from coding_agent.model_client import FakeModelClient
 from coding_agent.policy import PolicyEngine
 from coding_agent.protocol import ModelResponse, ToolCall, ToolOutcome
@@ -97,7 +106,7 @@ def test_explicit_file_mutation_prohibition_is_hard_enforced(
     assert run.explicit_task_constraints.forbid_file_mutation is True
 
 
-@pytest.mark.parametrize("tool_name", ["edit_file", "create_file"])
+@pytest.mark.parametrize("tool_name", ["edit_file", "apply_edits", "create_file"])
 def test_audit_file_prohibition_rejects_mutation_tools_at_runtime(
     tmp_path: Path,
     tool_name: str,
@@ -110,6 +119,13 @@ def test_audit_file_prohibition_rejects_mutation_tools_at_runtime(
         target.write_bytes(b"old")
         tool = EditFileTool(resolver)
         arguments = {"path": "main.py", "old_text": "old", "new_text": "new"}
+    elif tool_name == "apply_edits":
+        target.write_bytes(b"old")
+        tool = ApplyEditsTool(resolver)
+        arguments = {
+            "path": "main.py",
+            "edits": [{"old_text": "old", "new_text": "new"}],
+        }
     else:
         tool = CreateFileTool(resolver)
         arguments = {"path": "main.py", "content": "new"}
@@ -126,10 +142,49 @@ def test_audit_file_prohibition_rejects_mutation_tools_at_runtime(
     assert result.error is not None
     assert result.error.code == "FORBID_FILE_MUTATION"
     assert run.explicit_task_constraints.forbid_file_mutation is True
-    if tool_name == "edit_file":
+    if tool_name in {"edit_file", "apply_edits"}:
         assert target.read_bytes() == b"old"
     else:
         assert not target.exists()
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        ("create_directory", {"path": "new-directory"}),
+        ("move_path", {"source": "source.txt", "destination": "moved.txt"}),
+        ("delete_path", {"path": "source.txt"}),
+    ],
+)
+def test_file_prohibition_covers_lifecycle_tools_before_permission(
+    tmp_path: Path,
+    tool_name: str,
+    arguments: dict[str, str],
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "source.txt"
+    source.write_text("keep", encoding="utf-8")
+    resolver = WorkspacePathResolver(workspace)
+    tools = {
+        "create_directory": CreateDirectoryTool(resolver),
+        "move_path": MovePathTool(resolver),
+        "delete_path": DeletePathTool(resolver),
+    }
+
+    _, _, result = _runtime(
+        workspace,
+        tools[tool_name],
+        ToolCall(tool_name, tool_name, arguments),
+        "检查问题，但不要修改文件",
+    )
+
+    assert result.outcome is ToolOutcome.POLICY_REJECTED
+    assert result.error is not None
+    assert result.error.code == "FORBID_FILE_MUTATION"
+    assert source.read_text(encoding="utf-8") == "keep"
+    assert not (workspace / "new-directory").exists()
+    assert not (workspace / "moved.txt").exists()
 
 
 def test_explicit_command_prohibition_stops_shell_before_launch(
@@ -249,6 +304,41 @@ def test_write_scope_allows_inside_and_rejects_outside(tmp_path: Path) -> None:
     assert outside_result.error is not None
     assert outside_result.error.code == "WRITE_SCOPE"
     assert outside.read_bytes() == b"old"
+
+
+@pytest.mark.parametrize(
+    ("source", "destination"),
+    [
+        ("allowed/source.txt", "outside.txt"),
+        ("outside.txt", "allowed/destination.txt"),
+    ],
+)
+def test_move_write_scope_requires_both_source_and_destination_inside(
+    tmp_path: Path,
+    source: str,
+    destination: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    (workspace / "allowed").mkdir(parents=True)
+    (workspace / source).parent.mkdir(parents=True, exist_ok=True)
+    (workspace / source).write_text("keep", encoding="utf-8")
+    resolver = WorkspacePathResolver(workspace)
+    tool = MovePathTool(resolver)
+    prepared = tool.prepare(
+        "move",
+        tool.validate({"source": source, "destination": destination}),
+    )
+    assert isinstance(prepared, PreparedToolCall)
+    update = normalize_explicit_constraint_update("只修改 allowed/", resolver)
+    assert update is not None and update.write_scopes is not None
+
+    result = check_explicit_constraints(
+        prepared,
+        ExplicitConstraintSnapshot(write_scopes=update.write_scopes),
+    )
+
+    assert result.decision is ConstraintDecision.REJECT
+    assert result.reason_code == "WRITE_SCOPE"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="symlink creation is commonly restricted")

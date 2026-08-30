@@ -769,6 +769,8 @@ Normal / Debug CLI renderer
 
 该 callback 只接收 bounded observability facts。它是 synchronous、optional、read-only；其 return value 不参与 Agent control flow。它不得决定下一步 action、修改 `ToolResult` 或 `PolicyDecision`、改变 Run lifecycle、触发 Tool、改变 permission、扩大 privilege，或承担 persistent state ownership。Callback failure 必须被隔离，不得成为 Agent control-flow failure。
 
+Synchronous callback latency与stdout consumer backpressure计入Run wall-clock；极慢或阻塞的consumer可能消耗active-duration budget。v1隔离callback exception与control authority，但不承诺observer operational-latency isolation。
+
 “Optional”表示 Runtime 在 deterministic tests 或其他无 renderer 的 composition 中可以没有 observer；v1 CLI 为实现本文 Normal / Debug contract 时应提供该 callback。
 
 该 seam 至少应能向 CLI 提供：
@@ -1051,6 +1053,19 @@ completion_audit_finished
 ```
 
 这些 event 只携带 safe metadata，例如 Model Turn、触发 eligibility 的 capability、是否继续 Tool Loop和是否产生 Final；不得重复打印完整 Candidate、raw Context 或 Runtime Secret。Observer仍然 read-only、failure-isolated，不参与 audit control flow。
+
+### 29.2 Workspace Change Summary
+
+当 04 的 terminal `WorkspaceChangeFacts` 可用且至少存在一个 relevant path或uncertainty时，Normal CLI可以在 Final 前显示一个 concise trust summary，例如：
+
+```text
+Workspace changes: 1 pre-existing, 1 Agent-touched, 0 new/other
+Attribution uncertain: no
+```
+
+Normal只显示counts与uncertainty，不dump diff或完整path list。Debug可以显示bounded path lists和awareness state。non-Git / unavailable observer默认不在Normal制造warning noise；Debug仍可显示degraded state。
+
+该summary不声称semantic task success，不改变Final，不构成Git Tool family，也不提供mutation command。
 
 ---
 
@@ -1422,6 +1437,159 @@ formal separation服务于：
 
 ---
 
+### 42.1 Machine-Readable One-Shot
+
+CLI 支持：
+
+```text
+coding-agent --workspace <PATH> --json <one-shot task...>
+```
+
+`--json` 只适用于已有的 positional one-shot task；它不建立 JSON interactive Session、event stream 或 provider trace API。缺少 task 时在执行任何 Run 前返回 deterministic usage failure。
+
+在该模式中，stdout 必须恰好包含一个 newline-terminated valid JSON document。startup banner、progress、permission UI、Debug diagnostics 和其他 human presentation 不得混入 stdout；必要的 interactive prompt 或 diagnostic 可以使用 stderr。JSON 不含 Markdown、raw provider response、完整 Tool history、content-bearing Tool arguments 或 Runtime Secret。
+
+该machine contract也覆盖argparse阶段的missing required option、invalid value、unknown option与mutual-exclusion failure。CLI只pre-scan第一个显式`--json`/`--jsonl`以选择错误envelope，完整argv仍由同一个ArgumentParser解析；human mode继续使用标准argparse stderr/exit 2，`--help`保持标准行为。
+
+schema version 1 固定包含：
+
+```text
+schema_version
+lifecycle_state
+final_response
+terminal_reason
+normalized_error
+model_turns
+tool_attempts
+limit_reached
+```
+
+其中：
+
+* `lifecycle_state` 是 `COMPLETED` / `FAILED` / `CANCELLED`；Run 建立前的 startup / usage failure 使用 `STARTUP_FAILED`；
+* `final_response` 只在 Runtime 产生真实 Final 时为 string，并完整保留（Runtime Secret redaction 优先）；
+* `terminal_reason` 保存 normalized terminal code，正常 `COMPLETED` 为 `null`；
+* `normalized_error` 只提供 bounded `{code, message}`，不序列化 exception、traceback 或 provider payload；
+* counters 直接来自 terminal `AgentRun`，startup failure 为 `0`；
+* provider usage 只有在现有 Runtime 已提供可信 normalized aggregate 时才允许新增 optional versioned field；首版不为此修改 Provider / Runtime protocol。
+
+不得增加模糊的业务字段：
+
+```text
+success: true
+task_succeeded: true
+```
+
+因为 `COMPLETED` 只表示 Runtime 得到合规 Final，不证明模型的业务结论正确。process exit code 只表达 CLI / Runtime lifecycle：`0` = COMPLETED，`1` = FAILED，`130` = CANCELLED，`2` = startup / usage failure。
+
+---
+
+### 42.2 Explicit Non-Interactive One-Shot
+
+CLI 支持：
+
+```text
+coding-agent --workspace <PATH> --non-interactive <one-shot task...>
+coding-agent --workspace <PATH> --json --non-interactive <one-shot task...>
+```
+
+`--non-interactive` 必须有 positional task，不进入 top-level prompt，不读取 stdin，不 auto-approve permission，也不为 clarification制造答案。Shell stdin继续使用现有 noninteractive contract。普通不需要交互的任务保持原 Agent loop。
+
+若模型请求 `ask_user`，Run 终止为 `FAILED / CLARIFICATION_REQUIRED`；若一个 prepared action需要 `CONFIRM`，Run 在 action执行前终止为 `FAILED / PERMISSION_REQUIRED`。两者 process exit code均为 `3`，表示安全地需要外部输入；Policy `DENY` 仍是给模型的普通 rejection observation，不伪装成 permission request。
+
+Machine result 在这两个终止原因下增加一个 bounded `required_interaction` object。Clarification只包含 kind与question；permission只包含 kind、tool/operation category、bounded action preview、reason code、risk和 exact one-action scope。它不包含 PendingAction、完整 Tool arguments、content-bearing edits、Runtime Secret或可重放 approval token。其他 JSON shape保持不变。
+
+Interactive mode、无 `--non-interactive` 的 `--json` mode以及 ConsoleUserInteraction语义保持不变。
+
+---
+
+### 42.3 Explicit Persistent Session CLI
+
+CLI 提供四个显式入口：
+
+```text
+coding-agent --workspace <PATH> --persist-session <task...>
+coding-agent --workspace <PATH> --resume <SESSION_UUID> <follow-up task...>
+coding-agent --workspace <PATH> --list-sessions
+coding-agent --workspace <PATH> --delete-session <SESSION_UUID>
+```
+
+前两个入口也可省略 one-shot task而进入现有 interactive loop。`--persist-session` 创建新的 UUID session；`--resume` 只加载 exact canonical UUID，不创建 missing session。四者互斥。默认 CLI 行为不写 session checkpoint。
+
+Session documents 存在用户级 session directory；测试或受控 automation 可以通过 `CODING_AGENT_SESSION_DIR` 选择独立目录。每个 document 使用 schema version 1，包含 exact session ID、canonical workspace identity、last-completed timestamp 和 bounded completed-run task/final pairs。Missing、corrupt、unknown version、invalid ID 和 wrong workspace 都在 ModelClient construction / Run start 前作为 deterministic startup failure 返回。
+
+每个 `COMPLETED` Run 结束并清理 pending state后原子更新 checkpoint。`FAILED` / `CANCELLED` Run 不更新 checkpoint。写入使用同目录 exclusive temporary file + atomic replace；失败时保留旧 checkpoint并产生独立、Secret-safe persistence error。恢复不会复用旧 project instructions、dirty-workspace snapshot、hard constraints、Runtime counters或 pending state。
+
+Human mode 显示 bounded session ID。`--json` 与 persistence/resume组合时保留现有 schema version和字段，并额外包含 `session_id`、`session_checkpoint_updated` 与 nullable bounded `session_error`；未请求 persistence 时现有 JSON document shape不变。
+
+`--list-sessions` 与 `--delete-session` 是 model-free management operations：不接受 positional task或 `--non-interactive`，不进入 interactive loop，不需要 provider credentials，也不构造 ModelClient。List 只显示绑定当前 canonical workspace 的 session ID、validated UTC update time与 completed-run count；不显示 task/final continuity或其他 workspace sessions。Directory metadata可以为确定性选择而enumerate，但最多解析按canonical filename排序后的256个UUID checkpoint，并最多返回100个summary；超过scan/result bound时设置`truncated=true`。损坏、不可读或 symbolic-link documents 只在已扫描集合内贡献 anonymous `skipped_invalid_entries` count。Delete 要求 exact canonical UUID，验证 document、regular file与 workspace binding后只 unlink该 checkpoint；missing与 wrong-workspace均 deterministic failure。
+
+Management JSON 是独立 schema-versioned document。List 返回 `operation=list_sessions`、`workspace_identity`、metadata-only `sessions` array、`skipped_invalid_entries`与stable boolean `truncated`；delete返回 `operation=delete_session`、exact `session_id`与 `deleted=true`。管理失败沿用 no-Run startup failure document且 process exit code为 `2`。
+
+同一Session UUID的concurrent multi-process mutation不受支持，调用方应维持single writer。Atomic checkpoint只保证document不半写，不保证writer serialization；并发writer可能last-writer-wins。Delete只保证命令执行时checkpoint被移除，不kill/revoke active process；已active的resumed process完成后可能重新创建该UUID。
+
+### 42.4 Opt-In Change and Command Review
+
+CLI支持：
+
+```text
+coding-agent --workspace <PATH> --review <task...>
+coding-agent --workspace <PATH> --json --review <one-shot task...>
+```
+
+`--review` 也可与 `--non-interactive`、`--persist-session`或 `--resume`组合；它不适用于 model-free list/delete management。没有该 flag时，既有 human presentation与JSON document shape保持不变。
+
+Human terminal在Run终止后增加一个“变更与命令证据”块。Machine result增加一个 bounded `review` object：
+
+```text
+workspace_changes
+  awareness_state
+  pre_existing_dirty_paths
+  known_agent_touched_paths
+  new_or_other_dirty_paths
+  attribution_uncertain
+  paths_truncated
+command_evidence[]
+  command
+  cwd
+  outcome
+  exit_code
+  error_code
+  presentation_category
+command_evidence_truncated
+verification_sufficiency = NOT_INFERRED
+```
+
+Path每组最多投影50项；Runtime最多保留32条实际 Shell execution，command/cwd各500字符；已进入 execution后被取消的命令显示为 `INTERRUPTED`。所有文本在输出前再次做 Runtime Secret redaction，human terminal使用安全 quoting。Review不包含 stdout/stderr、edit content、未执行的 permission action、PendingAction或 provider payload。`presentation_category`只复用现有高置信 UI label，不是 verification判定；exit 0也不自动证明验证充分性。
+
+### 42.5 Bounded Non-Interactive JSONL Events
+
+CLI支持：
+
+```text
+coding-agent --workspace <PATH> --jsonl --non-interactive <one-shot task...>
+```
+
+`--jsonl` 与 `--json`互斥，必须同时使用`--non-interactive`与positional one-shot task；它不适用于interactive Session或model-free session management。它可以与`--review`、`--persist-session`或`--resume`组合。
+
+stdout只包含newline-delimited schema version 1 JSON documents。每行拥有从1开始严格递增的`sequence`。零个或多个event lines形如：
+
+```json
+{"schema_version":1,"type":"event","sequence":1,"event":{"kind":"run_started","facts":{}}}
+```
+
+最后恰有一个`type=result` line，其`result`复用§42.1 terminal JSON document（包括显式请求的review/session optional fields）。Startup/usage failure没有event line，只返回sequence 1的terminal result。Process exit code继续使用现有lifecycle语义。
+
+§42.1的machine-aware argparse规则同样适用于JSONL；即使完整parse失败，只要第一个显式machine intent为`--jsonl`，stdout仍只有sequence 1 terminal result且不产生`run_started`。
+
+Event只投影Runtime已经bounded、Secret-redacted的normalized scalar facts，并在CLI再次redact。JSONL明确剔除`action`、`diagnostic`、`pre_existing_paths`、`known_touched_paths`与`new_or_other_paths`；因此不包含Shell stdout/stderr、content-bearing Tool arguments、exact path lists、provider payload或reasoning continuation。需要exact terminal path/command facts时由用户显式组合`--review`，只在result中返回。
+
+JSONL是Runtime event stream，不是provider token streaming、partial Assistant/ToolCall protocol、Tool output streaming、persistent log或control channel。Event consumer不能approve permission、回答clarification或改变Runtime；required interaction仍只在terminal result中以exit 3表示。
+
+JSONL继承同步observer的backpressure contract：callback return与exception不改变Agent决策，但阻塞stdout consumer的等待时间属于Run wall-clock并可能消耗duration budget。
+
+---
+
 ## Interactive CLI and Session Control
 
 ### 43. Interactive Session Model
@@ -1441,7 +1609,7 @@ Run 3
 
 Session continuity仍遵守04/07。
 
-v1不提供 cross-process resume。
+Cross-process resume 只通过上一节的显式 terminal-safe checkpoint入口提供；默认 interactive Session仍是纯进程内行为。
 
 ---
 
@@ -1692,6 +1860,10 @@ CLI展示 failure reason后：
 27. Optional observability callback是synchronous、read-only且control-flow independent；callback failure不得成为Agent control-flow failure。
 28. Candidate Final 不进入 Normal output；eligible Run 进入 self-audit 时 Normal 最多显示一次轻量检查提示，真正 Final 只展示一次。
 29. Debug completion-audit events 必须 bounded、Secret-safe，不打印完整 Candidate，并且不能改变 Runtime control flow。
+30. `--json` 只支持 one-shot；stdout 恰好一个稳定 JSON document，human/debug surface 与 prompt 使用 stderr。
+31. machine-readable output 只报告 lifecycle facts，不把 `COMPLETED` 伪装成 semantic task success。
+32. machine-readable error bounded、normalized、Secret-safe，不包含 raw exception、provider payload或完整 Tool history。
+33. Workspace change summary只展示04提供的conservative facts；Normal默认counts-only，Debug path lists bounded。
 
 ---
 
@@ -1708,7 +1880,7 @@ CLI展示 failure reason后：
 9. CANCELLED Run默认返回 top-level prompt。
 10. 一个 terminal Run不得留下阻止同一 Session后续 Run启动的 pending Context/protocol state。
 11. startup invariant failure不进入 interactive Session。
-12. v1不提供 cross-process Session resume。
+12. cross-process resume只恢复 bounded COMPLETED task/final continuity，并创建新的 execution state。
 
 ---
 
@@ -1737,7 +1909,7 @@ EventBus
 ToolRenderer framework
 LoggingService
 TraceCollector
-SessionPersistence
+general SessionPersistence framework
 TerminalUI framework
 ```
 
@@ -1807,6 +1979,7 @@ LoggingConfig hierarchy
 * `/exit` / `/quit`；
 * active-Run Ctrl+C cancellation with Session recovery；
 * `FAILED` / `CANCELLED` 后 subsequent same-Session Run；
+* `--json` one-shot valid document、stdout isolation、stable lifecycle schema、exit codes、startup failure 和 Secret redaction；
 * corresponding configuration、observability 与 CLI tests。
 
 架构文档可以暂时领先实现，但最终提交前上述 09 normative contracts 必须具有对应 code 与 evidence。本文不修改 implementation plan，也不记录易 stale 的当前实现 snapshot table。
@@ -1828,6 +2001,7 @@ LoggingConfig hierarchy
 * `/exit` / EOF / empty input；
 * Ctrl+C Run cancellation；
 * FAILED / CANCELLED 后 same-Session next Run；
+* JSON COMPLETED / FAILED / CANCELLED / STARTUP_FAILED projections；
 * no automatic persistent log。
 
 最终提交前还应使用 representative real coding tasks 做一次 operational tuning check，确认默认 `max_context_chars = 80_000` 不会造成过度 destructive eviction 或反复读取相同材料。若 evidence 表明确有必要，可在现有 validated public range `8_000..256_000` 内调整 concrete default，而不改变 07 的 Context architecture。该检查不是 runtime contract，不要求固定 benchmark 数量，也不要求建立 tuner 或 benchmark framework。
@@ -1846,7 +2020,6 @@ v1不实现：
 general config files
 configuration profiles
 provider profile registry
-persistent Session resume
 GUI / TUI
 rich interactive panes
 expandable Tool result UI

@@ -247,6 +247,7 @@ CLI / Composition Root
         ▼
    AgentRuntime
    ├── ContextManager
+   ├── SessionStore (only when explicit persistence is requested)
    ├── ModelClient
    ├── ToolRegistry
    ├── PolicyEngine
@@ -301,6 +302,12 @@ CLI rendering
 
 逻辑。
 
+Runtime 可以在 mutable `AgentRun` 上组装04定义的 bounded command-execution facts，因为它知道 prepared Shell call是否真正跨过 execution boundary。该组装不得保存 stdout/stderr、不得进行 verification语义分类，也不得改变 ToolResult、Policy或 lifecycle。CLI只读取 terminal Run facts并负责 opt-in rendering。
+
+Composition root可以向Runtime注入一个 synchronous read-only event observer用于human renderer或machine JSONL projection；同一Runtime只绑定一个observer。Observer仍没有control authority，其失败按既有隔离语义处理。JSONL属于CLI对完整 normalized RuntimeEvent的逐事件投影，不改变ModelClient的non-streaming complete-response contract。
+
+Synchronous observer 的 return value 不参与 Agent control flow，callback exception 必须被隔离；但 callback latency与stdout backpressure仍属于当前 Run 的 wall-clock。极慢或阻塞的consumer可能消耗 active-duration budget，v1不提供observer operational-latency isolation。
+
 ---
 
 ### 4.2 ContextManager
@@ -325,7 +332,21 @@ CLI rendering
 
 ---
 
-### 4.3 ModelClient Protocol
+### 4.3 SessionStore
+
+`SessionStore` 是 composition-root 使用的 Lean terminal-safe persistence boundary。它只序列化 07 定义的 immutable completed-run continuity records 与最小 session metadata；它不参与 Agent loop、Run lifecycle、Context eviction、Policy 或 Tool dispatch。
+
+它必须提供 deterministic load/save/list/delete failure codes，验证 canonical session ID、schema version 和 workspace identity，并以 sibling temporary file + atomic replace 更新单个 session document。List 只返回 current-workspace metadata summaries，不返回 continuity；其他 workspace 的合法 documents 不可见，损坏或 symbolic-link entries 只形成 anonymous skipped count。Delete 必须在 unlink 前完成 exact ID、regular-file 与 workspace 验证，且只删除单个 checkpoint。
+
+同一 Session UUID采用single-writer expectation，不支持concurrent multi-process mutation。Atomic replace防止单次checkpoint半写，但不提供writer serialization；并发save可能last-writer-wins。Delete不是active-process revocation，只保证调用成功时exact document已被移除。
+
+List/delete 是 model-free composition-root operations，不要求 provider model、base URL 或 API key，也不得构造 `ModelClient`。它们不得解释对话语义、扫描 Workspace、序列化 ContextManager 内部状态，或持有 mutable `AgentRun`。
+
+`ContextManager` 只暴露 bounded completed-run continuity 的 typed import/export；只有在没有 active Run 时才允许 restore。`AgentRuntime` resume 后仍拥有一个全新的 `Session` 和全新的 Runs。
+
+---
+
+### 4.4 ModelClient Protocol
 
 `ModelClient` 是 `AgentRuntime` 面向模型调用的稳定 Protocol / interface。
 
@@ -345,7 +366,7 @@ Provider SDK 是否具备 streaming capability 不影响该 contract；v1 Runtim
 
 ---
 
-### 4.4 OpenAICompatibleModelClient
+### 4.5 OpenAICompatibleModelClient
 
 v1 的具体实现 `OpenAICompatibleModelClient` implements `ModelClient` Protocol，并在内部负责：
 
@@ -375,7 +396,7 @@ Provider-specific adaptation 是 concrete ModelClient 的内部职责，不构�
 
 ---
 
-### 4.5 ToolRegistry
+### 4.6 ToolRegistry
 
 `ToolRegistry` 负责：
 
@@ -402,7 +423,7 @@ ToolRegistry 不负责：
 
 ---
 
-### 4.6 Tool
+### 4.7 Tool
 
 Tool 负责：
 
@@ -416,7 +437,7 @@ Tool 不拥有 Agent lifecycle。
 
 ---
 
-### 4.7 PolicyEngine
+### 4.8 PolicyEngine
 
 `PolicyEngine` 负责两个独立阶段：
 
@@ -453,7 +474,7 @@ PreparedToolCall
 
 ---
 
-### 4.8 UserInteraction
+### 4.9 UserInteraction
 
 `UserInteraction` 是 Runtime 与用户之间的 I/O port。
 
@@ -470,6 +491,8 @@ PreparedToolCall
 * 执行 Tool；
 * 修改 Runtime lifecycle；
 * 判断风险。
+
+An explicit non-interactive implementation of this port never reads stdin. Instead, `confirm()` or `ask()` raises a typed `InteractionRequiredError` carrying the immutable `ConfirmationRequest` or `ClarificationRequest`. AgentRuntime catches this expected boundary before the generic `UserInteractionError` path, projects bounded Secret-safe terminal facts, terminates the Run with `PERMISSION_REQUIRED` or `CLARIFICATION_REQUIRED`, and clears PendingAction / wait state without producing a ToolResult or another Model Turn.
 
 ---
 
@@ -510,6 +533,8 @@ SystemMessage(text)
 
 UserMessage(text)
 
+ProjectInstructionMessage(text)
+
 RuntimeInstructionMessage(text)
 
 AssistantMessage(
@@ -534,6 +559,8 @@ Tool Call(s)
 其中 text 在存在 Tool Call 时仅属于当前 action commentary，不是 Final Response。
 
 `provider_reasoning_content` 是一个可选、internal-only 的 provider continuation field。它只用于满足 concrete ModelClient 在同一 Agent Run 内继续对话时的协议回放要求；它不是普通 assistant text，不得展示给用户、写入日志、进入 Tool argument / ToolResult，或进入 completed-run continuity。v1 只定义这一条窄字段，不建立通用 raw provider metadata 容器。
+
+`ProjectInstructionMessage` 是 07 定义的 current-Run、request-local、untrusted root `AGENTS.md` guidance。它不代表用户输入，不进入 trusted task-constraint update path、Conversation History 或 completed-run continuity。OpenAI-compatible ModelClient 将它映射为带有明确 provenance / priority wrapper 的 wire `user` role；内部类型区分必须始终保留，不能把它重新构造成 `UserMessage`、`SystemMessage` 或 `RuntimeInstructionMessage`。
 
 `RuntimeInstructionMessage` 是 Runtime 合成的 request-local control message，不代表用户输入，不写入 Conversation History，不进入 trusted task-constraint update path。OpenAI-compatible ModelClient 可将它映射为带有明确 `not user-authored` 标记的 wire `user` role，以便在 Assistant Candidate 后形成 provider 能可靠响应的新一轮；内部类型区分必须始终保留，不能把它重新构造成 `UserMessage`。
 
@@ -1608,6 +1635,8 @@ REJECT
 ```
 
 `UserInteractionError` 进入 Runtime failure path，使当前 Run `FAILED`；它不产生新的 Model Turn。
+
+`InteractionRequiredError` is not a channel failure. It is used only by explicit non-interactive composition and maps to the dedicated terminal reasons above. It never maps to APPROVE, REJECT, ANSWERED, or CANCELLED and therefore cannot silently choose on the user's behalf.
 
 ---
 

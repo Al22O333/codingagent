@@ -21,12 +21,13 @@
 
 ## 2. Product Form
 
-v1 是一个 **Local Interactive CLI**：
+v1 是一个 **Local CLI**：
 
 - 在用户本机运行。
 - 面向用户明确指定的本地 workspace。
-- 通过命令行与用户交互。
-- 支持在同一次程序运行期间连续提出和完成多个相关任务。
+- 支持 interactive Session，也支持 one-shot task invocation。
+- 为 automation 提供显式 machine-readable 与 non-interactive surface。
+- interactive mode 支持在同一次程序运行期间连续提出和完成多个相关任务。
 
 CLI 的具体命令、参数、输出布局和交互细节不在本文定义。
 
@@ -120,9 +121,9 @@ v1 中的 Debugging 限定为：
 
 - **Agent Run：**Agent 为完成一条用户任务而进行的一次自主执行过程，以完成、失败、被中断或触发限制结束。
 - **Session：**同一程序进程中的连续交互，可以包含多个 Agent Run。后续任务可以基于当前 Session 中此前的交互和项目变化继续提出要求。
-- **Persistent Session：**程序退出后保存并在未来恢复历史 Session。
+- **Persistent Session：**程序退出后保存并在未来恢复 bounded conversational continuity 的 Session；它不等于恢复 active Run 或执行状态。
 
-v1 支持 Agent Run 和进程内持续 Session，不支持 Persistent Session。关闭程序后，不承诺恢复此前的会话历史或运行状态。
+v1 支持 Agent Run、进程内持续 Session，以及显式 opt-in 的 terminal-safe Persistent Session。Persistent checkpoint 只保留少量已完成 Run 的 task / Final continuity，并绑定 exact session ID 与 canonical workspace；恢复时仍以当前 workspace 和当前项目指令为真实来源。v1 不保存或恢复 active Run、PendingAction、ToolResult、provider response、完整 transcript 或执行状态。
 
 同一 Session 中的后续任务可以与前一任务相关，也可以形成增量要求，例如先修复问题，再重构相关实现，最后补充测试。
 
@@ -202,7 +203,7 @@ v1 明确不以以下目标作为产品承诺：
 - 成为通用电脑操作 Agent。
 - 保证完成大型或高度复杂的软件项目任务。
 - 保证所有编程语言具有相同成功率、支持深度或专用能力。
-- 在程序退出后恢复 Session。
+- full-fidelity Session persistence，或在程序退出后恢复 active Run、pending interaction 与执行状态。
 - 以长期无人值守任务作为主要使用场景。
 - 同时操作多个 workspace。
 - 提供 IDE 或 GUI 自动化。
@@ -220,7 +221,8 @@ v1 明确不以以下目标作为产品承诺：
 | Git 专用能力及具体覆盖范围 | 06 |
 | 网络访问、workspace 外访问、Sandbox 强度、Permission Model 与确认规则 | 03 |
 | one-shot task invocation 与 interactive Session / REPL 的具体 CLI 入口 | 09 |
+| Persistent Session checkpoint / resume 的 lifecycle、内容与 CLI contract | 04、05、07、09 |
 
 ## 14. Final Product Definition
 
-一个运行在用户明确指定的本地 workspace 中、通过交互式 CLI 提供进程内持续 Session 的 language-neutral Coding Agent。它面向 Programming / Software Engineering，既支持已有项目，也支持小型 Greenfield Development，并可处理分析型与修改型任务。v1 的首要场景是在已有的小型代码项目中完成范围明确的 Bug 修复或小功能任务：检查相关代码、进行有限修改、执行非交互式验证，并根据结果迭代后报告结论。小型 Greenfield、局部重构、测试编写、Code Review、Code Exploration 和 Code Explanation 属于 Secondary Use Cases；v1 不承诺大型复杂项目、所有语言的同等能力、退出后的 Session 恢复、通用电脑操作或交互式 IDE / Debugger 自动化。
+一个运行在用户明确指定的本地 workspace 中、通过交互式 CLI 提供进程内持续 Session，并可显式保存和恢复 terminal-safe bounded continuity 的 language-neutral Coding Agent。它面向 Programming / Software Engineering，既支持已有项目，也支持小型 Greenfield Development，并可处理分析型与修改型任务。v1 的首要场景是在已有的小型代码项目中完成范围明确的 Bug 修复或小功能任务：检查相关代码、进行有限修改、执行非交互式验证，并根据结果迭代后报告结论。小型 Greenfield、局部重构、测试编写、Code Review、Code Exploration 和 Code Explanation 属于 Secondary Use Cases；v1 不承诺大型复杂项目、所有语言的同等能力、full-fidelity 或 active-Run Session 恢复、通用电脑操作或交互式 IDE / Debugger 自动化。

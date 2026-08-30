@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import shlex
 import subprocess
 import sys
@@ -13,7 +14,9 @@ from pathlib import Path
 import pytest
 
 from coding_agent import cli
+import coding_agent.session_store as session_store_module
 from coding_agent.cli import CLIConfig, ConsoleUserInteraction, build_runtime, load_config
+from coding_agent.context import CompletedRunContinuity
 from coding_agent.interaction import (
     ClarificationRequest,
     ClarificationStatus,
@@ -24,8 +27,16 @@ from coding_agent.interaction import (
 )
 from coding_agent.model_client import FakeModelClient
 from coding_agent.model_client import FatalProviderError
-from coding_agent.protocol import ModelRequest, ModelResponse, ModelUsage, ToolCall, ToolOutcome
+from coding_agent.protocol import (
+    ModelRequest,
+    ModelResponse,
+    ModelUsage,
+    ProjectInstructionMessage,
+    ToolCall,
+    ToolOutcome,
+)
 from coding_agent.runtime import RunState, RuntimeEvent
+from coding_agent.session_store import SessionStore
 
 
 def _config(workspace: Path) -> CLIConfig:
@@ -173,10 +184,42 @@ def test_composition_root_registers_complete_v1_toolset(tmp_path: Path) -> None:
         "search_files",
         "search_text",
         "edit_file",
+        "apply_edits",
         "create_file",
+        "create_directory",
+        "move_path",
+        "delete_path",
         "shell",
         "ask_user",
     ]
+
+
+def test_composition_loads_root_agents_for_each_run_and_redacts_secret(
+    tmp_path: Path,
+) -> None:
+    agents = tmp_path / "AGENTS.md"
+    agents.write_text("Use pytest. Secret=test-key", encoding="utf-8")
+    client = FakeModelClient(
+        [ModelResponse(text="First."), ModelResponse(text="Second.")]
+    )
+    runtime = build_runtime(
+        _config(tmp_path),
+        model_client=client,
+        user_interaction=FakeUserInteraction(),
+    )
+
+    assert runtime.run("First task").state is RunState.COMPLETED
+    agents.write_text("Use unittest.", encoding="utf-8")
+    assert runtime.run("Second task").state is RunState.COMPLETED
+
+    first_instruction = client.requests[0].messages[1]
+    second_instruction = client.requests[1].messages[1]
+    assert isinstance(first_instruction, ProjectInstructionMessage)
+    assert isinstance(second_instruction, ProjectInstructionMessage)
+    assert "Use pytest." in first_instruction.text
+    assert "test-key" not in first_instruction.text
+    assert "Use unittest." in second_instruction.text
+    assert "Use pytest." not in second_instruction.text
 
 
 def test_composition_uses_openai_compatible_client_by_default(
@@ -382,6 +425,750 @@ def test_one_shot_main_starts_runtime_and_prints_final(
     assert "◆ 运行结束" in output
     assert "Finished from CLI." in output
     assert fake.requests[0].messages[1].text == "inspect the project"  # type: ignore[union-attr]
+
+
+def test_json_one_shot_emits_one_stable_document_without_success_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _configure_main_environment(monkeypatch)
+    fake = FakeModelClient([ModelResponse(text="Could not prove the task.\n第二行")])
+    monkeypatch.setattr(cli, "OpenAICompatibleModelClient", lambda config: fake)
+
+    exit_code = cli.main(
+        ["--workspace", str(tmp_path), "--json", "inspect", "the", "project"]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out.count("\n") == 1
+    document = json.loads(captured.out)
+    assert list(document) == [
+        "schema_version",
+        "lifecycle_state",
+        "final_response",
+        "terminal_reason",
+        "normalized_error",
+        "model_turns",
+        "tool_attempts",
+        "limit_reached",
+    ]
+    assert document == {
+        "schema_version": 1,
+        "lifecycle_state": "COMPLETED",
+        "final_response": "Could not prove the task.\n第二行",
+        "terminal_reason": None,
+        "normalized_error": None,
+        "model_turns": 1,
+        "tool_attempts": 0,
+        "limit_reached": None,
+    }
+    assert "success" not in document
+    assert cli.STARTUP_MESSAGE not in captured.out
+    assert "正在运行" not in captured.out
+
+
+def test_json_one_shot_failure_is_normalized_and_redacts_runtime_secret(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secret = "json-provider-secret"
+    _configure_main_environment(monkeypatch)
+    monkeypatch.setenv("CODING_AGENT_API_KEY", secret)
+    fake = FakeModelClient([FatalProviderError(f"invalid key: {secret}")])
+    monkeypatch.setattr(cli, "OpenAICompatibleModelClient", lambda config: fake)
+
+    exit_code = cli.main(["--workspace", str(tmp_path), "--json", "inspect"])
+
+    captured = capsys.readouterr()
+    document = json.loads(captured.out)
+    assert exit_code == 1
+    assert document["lifecycle_state"] == "FAILED"
+    assert document["terminal_reason"] == "PROVIDER_FAILURE"
+    assert document["normalized_error"] == {
+        "code": "PROVIDER_FAILURE",
+        "message": "模型服务请求失败，请检查凭据、服务地址或稍后重试。",
+    }
+    assert document["final_response"] is None
+    assert secret not in captured.out
+    assert secret not in captured.err
+    assert "invalid key" not in captured.out
+    assert "Traceback" not in captured.out
+
+
+def test_json_one_shot_redacts_secret_from_otherwise_complete_final(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secret = "json-final-secret"
+    _configure_main_environment(monkeypatch)
+    monkeypatch.setenv("CODING_AGENT_API_KEY", secret)
+    fake = FakeModelClient([ModelResponse(text=f"Result: {secret}")])
+    monkeypatch.setattr(cli, "OpenAICompatibleModelClient", lambda config: fake)
+
+    exit_code = cli.main(["--workspace", str(tmp_path), "--json", "inspect"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert json.loads(captured.out)["final_response"] == "Result: <redacted>"
+    assert secret not in captured.out
+    assert secret not in captured.err
+
+
+def test_json_mode_routes_permission_ui_to_stderr_and_keeps_stdout_parseable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _configure_main_environment(monkeypatch)
+    (tmp_path / ".env").write_text("TOKEN=value\n", encoding="utf-8")
+    fake = FakeModelClient(
+        [
+            ModelResponse(
+                text=None,
+                tool_calls=(ToolCall("read", "read_file", {"path": ".env"}),)
+            ),
+            ModelResponse(text="The read was rejected."),
+        ]
+    )
+    monkeypatch.setattr(cli, "OpenAICompatibleModelClient", lambda config: fake)
+    monkeypatch.setattr(sys, "stdin", StringIO("n\n"))
+
+    exit_code = cli.main(["--workspace", str(tmp_path), "--json", "inspect"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    document = json.loads(captured.out)
+    assert document["final_response"] == "The read was rejected."
+    assert captured.out.count("\n") == 1
+    assert "需要确认" not in captured.out
+    assert "需要确认" in captured.err
+
+
+def test_json_cancellation_has_lifecycle_exit_code_without_error_payload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _configure_main_environment(monkeypatch)
+
+    class InterruptingClient:
+        def complete(self, request: ModelRequest) -> ModelResponse:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        cli, "OpenAICompatibleModelClient", lambda config: InterruptingClient()
+    )
+
+    exit_code = cli.main(["--workspace", str(tmp_path), "--json", "inspect"])
+
+    document = json.loads(capsys.readouterr().out)
+    assert exit_code == 130
+    assert document["lifecycle_state"] == "CANCELLED"
+    assert document["terminal_reason"] == "USER_CANCELLATION"
+    assert document["normalized_error"] is None
+    assert document["final_response"] is None
+
+
+def test_persisted_session_resumes_in_new_runtime_and_reloads_workspace_truth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _configure_main_environment(monkeypatch)
+    session_directory = tmp_path / "session-store"
+    monkeypatch.setenv("CODING_AGENT_SESSION_DIR", str(session_directory))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "AGENTS.md").write_text("OLD PROJECT RULE", encoding="utf-8")
+    (workspace / "state.txt").write_text("old workspace value", encoding="utf-8")
+    first_client = FakeModelClient([ModelResponse(text="Changed the old function.")])
+    monkeypatch.setattr(cli, "OpenAICompatibleModelClient", lambda config: first_client)
+
+    first_exit = cli.main(
+        [
+            "--workspace",
+            str(workspace),
+            "--json",
+            "--persist-session",
+            "Update the formatter function",
+        ]
+    )
+    first_document = json.loads(capsys.readouterr().out)
+    session_id = first_document["session_id"]
+
+    assert first_exit == 0
+    assert first_document["session_checkpoint_updated"] is True
+    assert first_document["session_error"] is None
+    assert (session_directory / f"{session_id}.json").is_file()
+
+    (workspace / "AGENTS.md").write_text("CURRENT PROJECT RULE", encoding="utf-8")
+    (workspace / "state.txt").write_text("current workspace value", encoding="utf-8")
+    second_client = FakeModelClient(
+        [
+            ModelResponse(
+                text=None,
+                tool_calls=(ToolCall("read-current", "read_file", {"path": "state.txt"}),),
+            ),
+            ModelResponse(text="Updated the referenced function again."),
+        ]
+    )
+    monkeypatch.setattr(cli, "OpenAICompatibleModelClient", lambda config: second_client)
+
+    second_exit = cli.main(
+        [
+            "--workspace",
+            str(workspace),
+            "--json",
+            "--resume",
+            session_id,
+            "Change its error wording too",
+        ]
+    )
+    second_document = json.loads(capsys.readouterr().out)
+
+    assert second_exit == 0
+    assert second_document["session_id"] == session_id
+    assert second_document["session_checkpoint_updated"] is True
+    first_request = second_client.requests[0]
+    assert any(
+        isinstance(message, ProjectInstructionMessage)
+        and "CURRENT PROJECT RULE" in message.text
+        and "OLD PROJECT RULE" not in message.text
+        for message in first_request.messages
+    )
+    assert any("Update the formatter function" in repr(message) for message in first_request.messages)
+    assert any("Changed the old function." in repr(message) for message in first_request.messages)
+    assert all("old workspace value" not in repr(message) for message in first_request.messages)
+    assert "current workspace value" in repr(second_client.requests[1].messages)
+
+
+def test_failed_and_cancelled_runs_never_create_persistent_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _configure_main_environment(monkeypatch)
+    session_directory = tmp_path / "session-store"
+    monkeypatch.setenv("CODING_AGENT_SESSION_DIR", str(session_directory))
+    monkeypatch.setattr(
+        cli,
+        "OpenAICompatibleModelClient",
+        lambda config: FakeModelClient([FatalProviderError("provider failed")]),
+    )
+
+    failed_exit = cli.main(
+        ["--workspace", str(tmp_path), "--json", "--persist-session", "fail"]
+    )
+    failed_document = json.loads(capsys.readouterr().out)
+
+    assert failed_exit == 1
+    assert failed_document["lifecycle_state"] == "FAILED"
+    assert failed_document["session_checkpoint_updated"] is False
+    assert list(session_directory.glob("*.json")) == []
+
+    class InterruptingClient:
+        def complete(self, request: ModelRequest) -> ModelResponse:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        cli, "OpenAICompatibleModelClient", lambda config: InterruptingClient()
+    )
+    cancelled_exit = cli.main(
+        ["--workspace", str(tmp_path), "--json", "--persist-session", "cancel"]
+    )
+    cancelled_document = json.loads(capsys.readouterr().out)
+
+    assert cancelled_exit == 130
+    assert cancelled_document["lifecycle_state"] == "CANCELLED"
+    assert cancelled_document["session_checkpoint_updated"] is False
+    assert list(session_directory.glob("*.json")) == []
+
+
+def test_persisted_checkpoint_redacts_runtime_secret_and_resume_errors_before_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secret = "persistent-provider-secret"
+    _configure_main_environment(monkeypatch)
+    monkeypatch.setenv("CODING_AGENT_API_KEY", secret)
+    session_directory = tmp_path / "session-store"
+    monkeypatch.setenv("CODING_AGENT_SESSION_DIR", str(session_directory))
+    monkeypatch.setattr(
+        cli,
+        "OpenAICompatibleModelClient",
+        lambda config: FakeModelClient([ModelResponse(text=f"Final contains {secret}")]),
+    )
+
+    exit_code = cli.main(
+        [
+            "--workspace",
+            str(tmp_path),
+            "--json",
+            "--persist-session",
+            f"Task contains {secret}",
+        ]
+    )
+    document = json.loads(capsys.readouterr().out)
+    raw_checkpoint = (
+        session_directory / f"{document['session_id']}.json"
+    ).read_text(encoding="utf-8")
+
+    assert exit_code == 0
+    assert secret not in raw_checkpoint
+    assert raw_checkpoint.count("<redacted>") == 2
+
+    constructed = False
+
+    def must_not_construct(config):  # type: ignore[no-untyped-def]
+        nonlocal constructed
+        constructed = True
+        raise AssertionError("model client constructed before resume validation")
+
+    monkeypatch.setattr(cli, "OpenAICompatibleModelClient", must_not_construct)
+    missing_id = "00000000-0000-0000-0000-000000000000"
+    missing_exit = cli.main(
+        ["--workspace", str(tmp_path), "--json", "--resume", missing_id, "follow up"]
+    )
+    missing_document = json.loads(capsys.readouterr().out)
+
+    assert missing_exit == 2
+    assert missing_document["normalized_error"]["code"] == "SESSION_NOT_FOUND"
+    assert constructed is False
+
+
+def test_session_list_is_model_free_workspace_scoped_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workspace = tmp_path / "workspace"
+    other_workspace = tmp_path / "other-workspace"
+    workspace.mkdir()
+    other_workspace.mkdir()
+    session_directory = tmp_path / "session-store"
+    session_id = "10000000-0000-4000-8000-000000000001"
+    other_id = "20000000-0000-4000-8000-000000000002"
+    store = SessionStore(session_directory)
+    store.save(
+        session_id=session_id,
+        workspace=workspace,
+        continuity=(CompletedRunContinuity("private task", "private final"),),
+    )
+    store.save(
+        session_id=other_id,
+        workspace=other_workspace,
+        continuity=(CompletedRunContinuity("other task", "other final"),),
+    )
+    monkeypatch.setenv("CODING_AGENT_SESSION_DIR", str(session_directory))
+    for name in (
+        "CODING_AGENT_MODEL",
+        "CODING_AGENT_BASE_URL",
+        "CODING_AGENT_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    def must_not_construct(config):  # type: ignore[no-untyped-def]
+        raise AssertionError("model client constructed during session listing")
+
+    monkeypatch.setattr(cli, "OpenAICompatibleModelClient", must_not_construct)
+
+    exit_code = cli.main(
+        ["--workspace", str(workspace), "--json", "--list-sessions"]
+    )
+    captured = capsys.readouterr()
+    document = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert captured.err == ""
+    assert captured.out.count("\n") == 1
+    assert document == {
+        "schema_version": 1,
+        "operation": "list_sessions",
+        "workspace_identity": os.path.normcase(str(workspace.resolve())),
+        "sessions": [
+            {
+                "session_id": session_id,
+                "updated_at": document["sessions"][0]["updated_at"],
+                "completed_run_count": 1,
+            }
+        ],
+        "skipped_invalid_entries": 0,
+        "truncated": False,
+    }
+    assert "private task" not in captured.out
+    assert other_id not in captured.out
+
+
+def test_session_list_reports_bounded_truncation_in_machine_and_human_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    session_directory = tmp_path / "session-store"
+    store = SessionStore(session_directory)
+    for session_id in (
+        "10000000-0000-4000-8000-000000000001",
+        "20000000-0000-4000-8000-000000000002",
+    ):
+        store.save(
+            session_id=session_id,
+            workspace=workspace,
+            continuity=(CompletedRunContinuity("private", "private"),),
+        )
+    monkeypatch.setattr(session_store_module, "MAX_SESSION_SCAN", 1)
+    monkeypatch.setenv("CODING_AGENT_SESSION_DIR", str(session_directory))
+
+    machine_exit = cli.main(
+        ["--workspace", str(workspace), "--json", "--list-sessions"]
+    )
+    machine = json.loads(capsys.readouterr().out)
+    human_exit = cli.main(["--workspace", str(workspace), "--list-sessions"])
+    human = capsys.readouterr()
+
+    assert machine_exit == 0
+    assert machine["truncated"] is True
+    assert len(machine["sessions"]) == 1
+    assert human_exit == 0
+    assert "truncated" in human.out
+
+
+def test_session_delete_is_exact_model_free_and_missing_is_deterministic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    session_directory = tmp_path / "session-store"
+    session_id = "30000000-0000-4000-8000-000000000003"
+    SessionStore(session_directory).save(
+        session_id=session_id,
+        workspace=workspace,
+        continuity=(CompletedRunContinuity("task", "final"),),
+    )
+    monkeypatch.setenv("CODING_AGENT_SESSION_DIR", str(session_directory))
+    for name in (
+        "CODING_AGENT_MODEL",
+        "CODING_AGENT_BASE_URL",
+        "CODING_AGENT_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    def must_not_construct(config):  # type: ignore[no-untyped-def]
+        raise AssertionError("model client constructed during session deletion")
+
+    monkeypatch.setattr(cli, "OpenAICompatibleModelClient", must_not_construct)
+
+    deleted_exit = cli.main(
+        [
+            "--workspace",
+            str(workspace),
+            "--json",
+            "--delete-session",
+            session_id,
+        ]
+    )
+    deleted = json.loads(capsys.readouterr().out)
+    missing_exit = cli.main(
+        [
+            "--workspace",
+            str(workspace),
+            "--json",
+            "--delete-session",
+            session_id,
+        ]
+    )
+    missing = json.loads(capsys.readouterr().out)
+
+    assert deleted_exit == 0
+    assert deleted == {
+        "schema_version": 1,
+        "operation": "delete_session",
+        "session_id": session_id,
+        "deleted": True,
+    }
+    assert missing_exit == 2
+    assert missing["normalized_error"]["code"] == "SESSION_NOT_FOUND"
+    assert not (session_directory / f"{session_id}.json").exists()
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [["task"], ["--non-interactive"], ["--review"]],
+)
+def test_session_management_rejects_run_arguments_before_model_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    extra: list[str],
+) -> None:
+    for name in (
+        "CODING_AGENT_MODEL",
+        "CODING_AGENT_BASE_URL",
+        "CODING_AGENT_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    exit_code = cli.main(
+        ["--workspace", str(tmp_path), "--json", "--list-sessions", *extra]
+    )
+    document = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 2
+    assert (
+        document["normalized_error"]["code"]
+        == "SESSION_MANAGEMENT_ARGUMENT_CONFLICT"
+    )
+    assert document["model_turns"] == 0
+
+
+def test_json_startup_and_missing_task_failures_remain_machine_readable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _configure_main_environment(monkeypatch)
+
+    missing_task_exit = cli.main(["--workspace", str(tmp_path), "--json"])
+    missing_task = json.loads(capsys.readouterr().out)
+
+    assert missing_task_exit == 2
+    assert missing_task["lifecycle_state"] == "STARTUP_FAILED"
+    assert missing_task["normalized_error"]["code"] == "JSON_ONE_SHOT_REQUIRED"
+    assert missing_task["model_turns"] == 0
+
+    missing_workspace_exit = cli.main(
+        ["--workspace", str(tmp_path / "missing"), "--json", "inspect"]
+    )
+    missing_workspace_capture = capsys.readouterr()
+    missing_workspace = json.loads(missing_workspace_capture.out)
+
+    assert missing_workspace_exit == 2
+    assert missing_workspace["lifecycle_state"] == "STARTUP_FAILED"
+    assert missing_workspace["terminal_reason"] == "STARTUP_FAILURE"
+    assert missing_workspace["normalized_error"]["code"] == "STARTUP_FAILURE"
+    assert "Traceback" not in missing_workspace_capture.out
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--json"],
+        ["--workspace", ".", "--json", "--max-turns", "not-an-int", "inspect"],
+        ["--workspace", ".", "--json", "--unknown-option", "inspect"],
+        ["--workspace", ".", "--json", "--max-turns"],
+        ["--workspace", ".", "--json", "--jsonl", "--non-interactive", "inspect"],
+        [
+            "--workspace",
+            ".",
+            "--json",
+            "--persist-session",
+            "--resume",
+            "00000000-0000-0000-0000-000000000000",
+            "inspect",
+        ],
+    ],
+)
+def test_json_argparse_failures_are_one_machine_document(
+    arguments: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    secret = "machine-usage-secret"
+    monkeypatch.setenv("CODING_AGENT_API_KEY", secret)
+    invocation = [
+        f"--unknown={secret}" if argument == "--unknown-option" else argument
+        for argument in arguments
+    ]
+
+    exit_code = cli.main(invocation)
+    captured = capsys.readouterr()
+    lines = captured.out.splitlines()
+    document = json.loads(lines[0])
+
+    assert exit_code == 2
+    assert len(lines) == 1
+    assert captured.err == ""
+    assert document["lifecycle_state"] == "STARTUP_FAILED"
+    assert document["normalized_error"]["code"] == "CLI_USAGE_ERROR"
+    assert secret not in captured.out
+
+
+def test_human_argparse_failure_and_help_keep_normal_behavior(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as failure:
+        cli.main(["--max-turns", "not-an-int"])
+    failed = capsys.readouterr()
+
+    assert failure.value.code == 2
+    assert failed.out == ""
+    assert "usage: coding-agent" in failed.err
+
+    with pytest.raises(SystemExit) as help_exit:
+        cli.main(["--help"])
+    helped = capsys.readouterr()
+
+    assert help_exit.value.code == 0
+    assert "usage: coding-agent" in helped.out
+    assert helped.err == ""
+
+    with pytest.raises(SystemExit) as machine_help_exit:
+        cli.main(["--json", "--help"])
+    machine_help = capsys.readouterr()
+
+    assert machine_help_exit.value.code == 0
+    assert "usage: coding-agent" in machine_help.out
+    assert machine_help.err == ""
+
+
+def test_json_startup_config_failure_is_one_machine_document(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _configure_main_environment(monkeypatch)
+
+    exit_code = cli.main(
+        [
+            "--workspace",
+            str(tmp_path),
+            "--json",
+            "--max-turns",
+            "0",
+            "inspect",
+        ]
+    )
+    captured = capsys.readouterr()
+    lines = captured.out.splitlines()
+    document = json.loads(lines[0])
+
+    assert exit_code == 2
+    assert len(lines) == 1
+    assert captured.err == ""
+    assert document["lifecycle_state"] == "STARTUP_FAILED"
+    assert document["normalized_error"]["code"] == "STARTUP_FAILURE"
+
+
+def test_noninteractive_json_never_reads_stdin_and_reports_clarification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _configure_main_environment(monkeypatch)
+    secret = "test-key"
+    fake = FakeModelClient(
+        [
+            ModelResponse(
+                None,
+                (
+                    ToolCall(
+                        "ask",
+                        "ask_user",
+                        {"question": f"Which format should contain {secret}?"},
+                    ),
+                ),
+            )
+        ]
+    )
+    monkeypatch.setattr(cli, "OpenAICompatibleModelClient", lambda config: fake)
+    guarded_stdin = StringIO("SHOULD_NOT_BE_READ")
+    monkeypatch.setattr(sys, "stdin", guarded_stdin)
+
+    exit_code = cli.main(
+        ["--workspace", str(tmp_path), "--json", "--non-interactive", "implement"]
+    )
+    captured = capsys.readouterr()
+    document = json.loads(captured.out)
+
+    assert exit_code == 3
+    assert captured.out.count("\n") == 1
+    assert document["lifecycle_state"] == "FAILED"
+    assert document["terminal_reason"] == "CLARIFICATION_REQUIRED"
+    assert document["required_interaction"] == {
+        "kind": "CLARIFICATION",
+        "question": "Which format should contain <redacted>?",
+        "tool_name": None,
+        "operation_category": None,
+        "action_preview": None,
+        "reason_code": None,
+        "risk": None,
+        "exact_scope": None,
+    }
+    assert secret not in captured.out
+    assert secret not in captured.err
+    assert guarded_stdin.tell() == 0
+
+
+def test_noninteractive_permission_result_is_exact_and_action_is_not_executed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _configure_main_environment(monkeypatch)
+    target = tmp_path / "obsolete.txt"
+    target.write_text("sentinel", encoding="utf-8")
+    fake = FakeModelClient(
+        [
+            ModelResponse(
+                None,
+                (ToolCall("delete", "delete_path", {"path": "obsolete.txt"}),),
+            )
+        ]
+    )
+    monkeypatch.setattr(cli, "OpenAICompatibleModelClient", lambda config: fake)
+    guarded_stdin = StringIO("SHOULD_NOT_BE_READ")
+    monkeypatch.setattr(sys, "stdin", guarded_stdin)
+
+    exit_code = cli.main(
+        [
+            "--workspace",
+            str(tmp_path),
+            "--json",
+            "--non-interactive",
+            "delete obsolete.txt",
+        ]
+    )
+    document = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 3
+    assert document["terminal_reason"] == "PERMISSION_REQUIRED"
+    required = document["required_interaction"]
+    assert required["kind"] == "PERMISSION"
+    assert required["tool_name"] == "delete_path"
+    assert required["operation_category"] == "delete_path"
+    assert required["action_preview"] == "obsolete.txt"
+    assert required["reason_code"] == "FILE_DELETE_CONFIRMATION"
+    assert required["exact_scope"] == "one exact prepared action; not approved or executed"
+    assert target.read_text(encoding="utf-8") == "sentinel"
+    assert guarded_stdin.tell() == 0
+
+
+def test_noninteractive_requires_one_shot_task_in_human_and_json_modes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _configure_main_environment(monkeypatch)
+
+    human_exit = cli.main(["--workspace", str(tmp_path), "--non-interactive"])
+    human = capsys.readouterr()
+    json_exit = cli.main(
+        ["--workspace", str(tmp_path), "--json", "--non-interactive"]
+    )
+    machine = json.loads(capsys.readouterr().out)
+
+    assert human_exit == 2
+    assert "requires a one-shot task" in human.err
+    assert json_exit == 2
+    assert machine["normalized_error"]["code"] == "NON_INTERACTIVE_ONE_SHOT_REQUIRED"
 
 
 def test_invalid_workspace_fails_startup_before_model_client_construction(
@@ -616,6 +1403,9 @@ def test_shell_rendering_is_bounded_and_redacts_runtime_credential(
     [
         ("pytest -q", "test"),
         ("python -m pytest -q", "test"),
+        ("python -B -m unittest -q", "test"),
+        ("python -u -m pytest -q", "test"),
+        ("python -O -m pytest -q", None),
         ("ruff check src", "check"),
         ("cargo build", "build"),
         ("npm run build", "build"),
@@ -819,6 +1609,52 @@ def test_failed_shell_diagnostic_prefers_error_lines_and_stays_bounded() -> None
     assert "error: compilation failed" in rendered
     assert "x" * 1_000 not in rendered
     assert len(rendered) < 1_000
+
+
+def test_workspace_change_summary_is_counts_only_in_normal_and_bounded_in_debug() -> None:
+    event = RuntimeEvent(
+        "workspace_change_summary",
+        {
+            "awareness_state": "AVAILABLE",
+            "pre_existing_count": 1,
+            "known_touched_count": 2,
+            "new_or_other_count": 1,
+            "attribution_uncertain": True,
+            "truncated": False,
+            "pre_existing_paths": "user-secret-name.txt",
+            "known_touched_paths": "a.py | b.py",
+            "new_or_other_paths": "other.txt",
+        },
+    )
+
+    normal = "\n".join(cli._render_event(event, debug=False))
+    debug = "\n".join(cli._render_event(event, debug=True))
+
+    assert "运行前已有 1" in normal
+    assert "Agent 已触及 2" in normal
+    assert "其他新增 1" in normal
+    assert "不完全确定" in normal
+    assert "user-secret-name.txt" not in normal
+    assert "user-secret-name.txt" in debug
+    assert len(debug) < 3_000
+
+
+def test_unavailable_workspace_awareness_is_normal_silent() -> None:
+    event = RuntimeEvent(
+        "workspace_change_summary",
+        {
+            "awareness_state": "NOT_GIT",
+            "pre_existing_count": 0,
+            "known_touched_count": 0,
+            "new_or_other_count": 0,
+            "attribution_uncertain": True,
+        },
+    )
+
+    assert cli._render_event(event, debug=False) == ()
+    assert "workspace_change_summary" in "\n".join(
+        cli._render_event(event, debug=True)
+    )
 
 
 def test_cli_provider_failure_is_understandable_and_does_not_leak_secret(

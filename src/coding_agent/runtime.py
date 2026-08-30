@@ -15,19 +15,25 @@ from pydantic import ValidationError
 from .ask_user import AskUserArguments
 from .create_file import CreateFileContent
 from .discovery import ListDirectoryContent, SearchFilesContent
-from .edit_file import EditFileContent
+from .edit_file import ApplyEditsContent, EditFileContent
+from .file_lifecycle import (
+    CreateDirectoryContent,
+    DeletePathContent,
+    MovePathContent,
+)
 from .constraints import (
     ConstraintDecision,
     ExplicitConstraintSnapshot,
     apply_constraint_update,
     normalize_explicit_constraint_update,
 )
-from .context import ContextManager
+from .context import CompletedRunContinuity, ContextManager
 from .interaction import (
     ConfirmationDecision,
     ConfirmationRequest,
     ClarificationRequest,
     ClarificationStatus,
+    InteractionRequiredError,
     UserInteraction,
     UserInteractionError,
 )
@@ -54,7 +60,7 @@ from .protocol import (
 )
 from .read_file import ReadFileContent
 from .search_text import SearchTextContent
-from .shell import ShellContent
+from .shell import ShellContent, ShellOperationFacts
 from .tooling import (
     LocalTool,
     PreparedToolCall,
@@ -62,7 +68,14 @@ from .tooling import (
     ToolRegistry,
     UnknownToolError,
 )
-from .workspace import WorkspacePathResolver
+from .workspace import FileOperationFacts, WorkspacePathResolver
+from .workspace_awareness import (
+    WorkspaceAwarenessState,
+    WorkspaceChangeFacts,
+    WorkspaceChangeObserver,
+    WorkspaceSnapshot,
+    build_workspace_change_facts,
+)
 
 
 def _bounded_observation_text(value: str, limit: int) -> str:
@@ -73,6 +86,10 @@ def _bounded_observation_text(value: str, limit: int) -> str:
     head = retained * 2 // 3
     tail = retained - head
     return value[:head] + marker + (value[-tail:] if tail else "")
+
+
+MAX_COMMAND_EVIDENCE = 32
+MAX_COMMAND_EVIDENCE_CHARS = 500
 
 
 class RunState(StrEnum):
@@ -92,6 +109,8 @@ class TerminationReason(StrEnum):
     PROVIDER_FAILURE = "PROVIDER_FAILURE"
     LIMIT_REACHED = "LIMIT_REACHED"
     USER_CANCELLATION = "USER_CANCELLATION"
+    CLARIFICATION_REQUIRED = "CLARIFICATION_REQUIRED"
+    PERMISSION_REQUIRED = "PERMISSION_REQUIRED"
     USER_INTERACTION_FAILURE = "USER_INTERACTION_FAILURE"
     RUNTIME_FAILURE = "RUNTIME_FAILURE"
 
@@ -101,6 +120,13 @@ class WaitReason(StrEnum):
 
     PERMISSION_CONFIRMATION = "PERMISSION_CONFIRMATION"
     CLARIFICATION = "CLARIFICATION"
+
+
+class RequiredInteractionKind(StrEnum):
+    """Safe terminal interaction categories for non-interactive execution."""
+
+    CLARIFICATION = "CLARIFICATION"
+    PERMISSION = "PERMISSION"
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +158,37 @@ class PendingAction:
 
     prepared_call: PreparedToolCall
     permission_reason: PermissionCheckResult
+
+
+@dataclass(frozen=True, slots=True)
+class RequiredInteraction:
+    """Bounded terminal facts that cannot authorize or resume an action."""
+
+    kind: RequiredInteractionKind
+    question: str | None = None
+    tool_name: str | None = None
+    action_preview: str | None = None
+    reason_code: str | None = None
+    risk: str | None = None
+    exact_scope: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CommandExecutionEvidence:
+    """Bounded factual evidence for one Shell call that reached execution."""
+
+    command: str
+    cwd: str
+    outcome: ToolOutcome | None
+    exit_code: int | None = None
+    error_code: str | None = None
+    interrupted: bool = False
+
+    def __post_init__(self) -> None:
+        if self.interrupted != (self.outcome is None):
+            raise ValueError(
+                "interrupted command evidence must have no Tool outcome"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +247,18 @@ class AgentRun:
     completion_audit_required: bool = False
     completion_audit_active: bool = False
     pending_final_candidate: str | None = None
+    workspace_change_facts: WorkspaceChangeFacts | None = None
+    required_interaction: RequiredInteraction | None = None
+    command_execution_evidence: list[CommandExecutionEvidence] = field(
+        default_factory=list
+    )
+    command_evidence_truncated: bool = False
+    _workspace_start_snapshot: WorkspaceSnapshot | None = field(
+        default=None,
+        repr=False,
+    )
+    _known_agent_touched_paths: set[str] = field(default_factory=set, repr=False)
+    _workspace_execution_uncertain: bool = field(default=False, repr=False)
 
 
 @dataclass(slots=True)
@@ -227,6 +296,8 @@ class AgentRuntime:
         transport_retry_max_delay_seconds: float = 2.0,
         observer: Callable[[RuntimeEvent], object] | None = None,
         runtime_secret_values: tuple[str, ...] = (),
+        workspace_change_observer: WorkspaceChangeObserver | None = None,
+        session_id: str | None = None,
     ) -> None:
         if (
             not isfinite(transport_retry_base_delay_seconds)
@@ -257,7 +328,16 @@ class AgentRuntime:
         self._runtime_secret_values = tuple(
             value for value in runtime_secret_values if value
         )
-        self.session = Session()
+        self._workspace_change_observer = workspace_change_observer
+        self.session = (
+            Session(session_id=session_id) if session_id is not None else Session()
+        )
+
+    @property
+    def completed_run_continuity(self) -> tuple[CompletedRunContinuity, ...]:
+        """Expose only terminal-safe Context continuity for explicit persistence."""
+
+        return self._context_manager.completed_run_continuity
 
     def run(self, task: str) -> AgentRun:
         """Run one user task until a final response or terminal failure."""
@@ -265,6 +345,7 @@ class AgentRuntime:
         run_started_at = self._clock()
         try:
             self.session._add_run(agent_run)
+            self._begin_workspace_awareness(agent_run)
             self._emit("run_started", run_id=agent_run.run_id)
             return self._run_until_terminal(agent_run, task, run_started_at)
         except KeyboardInterrupt:
@@ -273,6 +354,20 @@ class AgentRuntime:
                 RunState.CANCELLED,
                 TerminationReason.USER_CANCELLATION,
                 run_started_at,
+            )
+        except InteractionRequiredError as error:
+            agent_run.required_interaction = self._required_interaction(error)
+            reason = (
+                TerminationReason.PERMISSION_REQUIRED
+                if isinstance(error.request, ConfirmationRequest)
+                else TerminationReason.CLARIFICATION_REQUIRED
+            )
+            self._terminate_run(
+                agent_run,
+                RunState.FAILED,
+                reason,
+                run_started_at,
+                error,
             )
         except UserInteractionError as error:
             self._terminate_run(
@@ -296,6 +391,7 @@ class AgentRuntime:
                 RunState.FAILED,
                 RunState.CANCELLED,
             }:
+                self._finalize_workspace_awareness(agent_run)
                 self._clear_pending_state(agent_run)
                 self._context_manager.end_run(
                     completed=agent_run.state is RunState.COMPLETED
@@ -314,6 +410,31 @@ class AgentRuntime:
                     tool_call_attempts=agent_run.tool_call_attempts,
                 )
         return agent_run
+
+    def _required_interaction(
+        self,
+        error: InteractionRequiredError,
+    ) -> RequiredInteraction:
+        request = error.request
+        if isinstance(request, ClarificationRequest):
+            return RequiredInteraction(
+                kind=RequiredInteractionKind.CLARIFICATION,
+                question=_bounded_observation_text(
+                    self._redact_runtime_secrets(request.question), 1_000
+                ),
+            )
+        return RequiredInteraction(
+            kind=RequiredInteractionKind.PERMISSION,
+            tool_name=request.tool_name[:200],
+            action_preview=_bounded_observation_text(
+                self._redact_runtime_secrets(request.action_summary), 1_000
+            ),
+            reason_code=request.reason_code[:200],
+            risk=_bounded_observation_text(
+                self._redact_runtime_secrets(request.risk_summary), 1_000
+            ),
+            exact_scope="one exact prepared action; not approved or executed",
+        )
 
     def _run_until_terminal(
         self,
@@ -837,7 +958,7 @@ class AgentRuntime:
                 agent_run,
             )
 
-        return self._execute_prepared(tool, prepared)
+        return self._execute_prepared(tool, prepared, agent_run)
 
     def _ask_user(
         self,
@@ -937,7 +1058,12 @@ class AgentRuntime:
             )
             if decision is ConfirmationDecision.APPROVE:
                 agent_run.state = RunState.RUNNING
-                return self._execute_prepared(tool, pending.prepared_call, ends_batch=True)
+                return self._execute_prepared(
+                    tool,
+                    pending.prepared_call,
+                    agent_run,
+                    ends_batch=True,
+                )
             if decision is ConfirmationDecision.REJECT:
                 agent_run.state = RunState.RUNNING
                 return self._dispatch_result(
@@ -971,39 +1097,186 @@ class AgentRuntime:
         self,
         tool: LocalTool,
         prepared: PreparedToolCall,
+        agent_run: AgentRun,
         *,
         ends_batch: bool = False,
     ) -> _ToolDispatchResult:
 
+        capabilities = prepared.tool_identity.capabilities
+        if ToolCapability.COMMAND_EXECUTION in capabilities:
+            agent_run._workspace_execution_uncertain = True
+
         try:
             execution = tool.execute(prepared)
+        except KeyboardInterrupt:
+            self._record_interrupted_command(agent_run, prepared)
+            raise
         except Exception:
-            return self._dispatch_result(self._operation_failure(
+            if ToolCapability.FILE_MUTATION in capabilities:
+                agent_run._workspace_execution_uncertain = True
+            failed = self._operation_failure(
                 prepared.call_id,
                 prepared.tool_identity.name,
                 ToolError(
                     code="INTERNAL_TOOL_ERROR",
                     message="local tool execution failed unexpectedly",
                 ),
-            ))
+            )
+            self._record_command_execution(agent_run, prepared, failed)
+            return self._dispatch_result(failed)
 
         if not isinstance(execution, ToolExecutionResult):
-            return self._dispatch_result(self._operation_failure(
+            if ToolCapability.FILE_MUTATION in capabilities:
+                agent_run._workspace_execution_uncertain = True
+            failed = self._operation_failure(
                 prepared.call_id,
                 prepared.tool_identity.name,
                 ToolError(
                     code="INTERNAL_TOOL_ERROR",
                     message="local tool returned an invalid execution result",
                 ),
-            ))
+            )
+            self._record_command_execution(agent_run, prepared, failed)
+            return self._dispatch_result(failed)
 
-        return self._dispatch_result(ToolResult(
+        self._record_file_execution_awareness(agent_run, prepared, execution)
+        result = ToolResult(
             call_id=prepared.call_id,
             tool_name=prepared.tool_identity.name,
             outcome=execution.outcome,
             content=execution.content,
             error=execution.error,
-        ), ends_batch=ends_batch)
+        )
+        self._record_command_execution(agent_run, prepared, result)
+        return self._dispatch_result(result, ends_batch=ends_batch)
+
+    def _record_command_execution(
+        self,
+        agent_run: AgentRun,
+        prepared: PreparedToolCall,
+        result: ToolResult,
+    ) -> None:
+        facts = prepared.operation_facts
+        if not isinstance(facts, ShellOperationFacts):
+            return
+        if len(agent_run.command_execution_evidence) >= MAX_COMMAND_EVIDENCE:
+            agent_run.command_evidence_truncated = True
+            return
+        content = result.content
+        command = content.command if isinstance(content, ShellContent) else facts.command
+        cwd = (
+            content.cwd
+            if isinstance(content, ShellContent)
+            else facts.cwd.workspace_relative_path or "."
+        )
+        agent_run.command_execution_evidence.append(
+            CommandExecutionEvidence(
+                command=_bounded_observation_text(
+                    self._redact_runtime_secrets(command),
+                    MAX_COMMAND_EVIDENCE_CHARS,
+                ),
+                cwd=_bounded_observation_text(
+                    self._redact_runtime_secrets(cwd),
+                    MAX_COMMAND_EVIDENCE_CHARS,
+                ),
+                outcome=result.outcome,
+                exit_code=(
+                    content.exit_code if isinstance(content, ShellContent) else None
+                ),
+                error_code=result.error.code if result.error is not None else None,
+            )
+        )
+
+    def _record_interrupted_command(
+        self,
+        agent_run: AgentRun,
+        prepared: PreparedToolCall,
+    ) -> None:
+        facts = prepared.operation_facts
+        if not isinstance(facts, ShellOperationFacts):
+            return
+        if len(agent_run.command_execution_evidence) >= MAX_COMMAND_EVIDENCE:
+            agent_run.command_evidence_truncated = True
+            return
+        agent_run.command_execution_evidence.append(
+            CommandExecutionEvidence(
+                command=_bounded_observation_text(
+                    self._redact_runtime_secrets(facts.command),
+                    MAX_COMMAND_EVIDENCE_CHARS,
+                ),
+                cwd=_bounded_observation_text(
+                    self._redact_runtime_secrets(
+                        facts.cwd.workspace_relative_path or "."
+                    ),
+                    MAX_COMMAND_EVIDENCE_CHARS,
+                ),
+                outcome=None,
+                error_code="USER_CANCELLATION",
+                interrupted=True,
+            )
+        )
+
+    @staticmethod
+    def _record_file_execution_awareness(
+        agent_run: AgentRun,
+        prepared: PreparedToolCall,
+        execution: ToolExecutionResult,
+    ) -> None:
+        if ToolCapability.FILE_MUTATION not in prepared.tool_identity.capabilities:
+            return
+        facts = prepared.operation_facts
+        if (
+            execution.outcome is not ToolOutcome.SUCCESS
+            or not isinstance(facts, FileOperationFacts)
+            or not facts.affected_paths
+        ):
+            agent_run._workspace_execution_uncertain = True
+            return
+        for affected_path in facts.affected_paths:
+            relative_path = affected_path.workspace_relative_path
+            if relative_path is None:
+                agent_run._workspace_execution_uncertain = True
+            else:
+                agent_run._known_agent_touched_paths.add(relative_path)
+
+    def _begin_workspace_awareness(self, agent_run: AgentRun) -> None:
+        observer = self._workspace_change_observer
+        if observer is None:
+            return
+        try:
+            snapshot = observer.snapshot()
+        except Exception:
+            snapshot = WorkspaceSnapshot(WorkspaceAwarenessState.UNAVAILABLE)
+        agent_run._workspace_start_snapshot = snapshot
+
+    def _finalize_workspace_awareness(self, agent_run: AgentRun) -> None:
+        observer = self._workspace_change_observer
+        start = agent_run._workspace_start_snapshot
+        if observer is None or start is None:
+            return
+        try:
+            end = observer.snapshot()
+        except Exception:
+            end = WorkspaceSnapshot(WorkspaceAwarenessState.UNAVAILABLE)
+        facts = build_workspace_change_facts(
+            start,
+            end,
+            agent_run._known_agent_touched_paths,
+            execution_uncertain=agent_run._workspace_execution_uncertain,
+        )
+        agent_run.workspace_change_facts = facts
+        self._emit(
+            "workspace_change_summary",
+            awareness_state=facts.awareness_state.value,
+            pre_existing_count=len(facts.pre_existing_dirty_paths),
+            known_touched_count=len(facts.known_agent_touched_paths),
+            new_or_other_count=len(facts.new_or_other_dirty_paths),
+            attribution_uncertain=facts.attribution_uncertain,
+            truncated=facts.truncated,
+            pre_existing_paths=" | ".join(facts.pre_existing_dirty_paths),
+            known_touched_paths=" | ".join(facts.known_agent_touched_paths),
+            new_or_other_paths=" | ".join(facts.new_or_other_dirty_paths),
+        )
 
     def _emit_tool_result(self, result: ToolResult) -> None:
         facts: dict[str, str | int | float | bool | None] = {
@@ -1025,10 +1298,16 @@ class AgentRuntime:
             facts["result_count"] = len(content.matches)
         elif isinstance(content, SearchTextContent):
             facts["result_count"] = len(content.matches)
-        elif isinstance(content, EditFileContent):
+        elif isinstance(content, (ApplyEditsContent, EditFileContent)):
             facts["replacement_count"] = content.replacement_count
         elif isinstance(content, CreateFileContent):
             facts["created"] = True
+        elif isinstance(content, CreateDirectoryContent):
+            facts["created_directory"] = True
+        elif isinstance(content, MovePathContent):
+            facts["moved"] = True
+        elif isinstance(content, DeletePathContent):
+            facts["deleted"] = True
         elif isinstance(content, ShellContent):
             facts["exit_code"] = content.exit_code
             diagnostic = content.stderr.strip() or content.stdout.strip()
@@ -1173,11 +1452,16 @@ class AgentRuntime:
 __all__ = [
     "AgentRun",
     "AgentRuntime",
+    "CommandExecutionEvidence",
+    "MAX_COMMAND_EVIDENCE",
+    "MAX_COMMAND_EVIDENCE_CHARS",
     "ModelProtocolError",
     "RuntimeLimits",
     "RuntimeEvent",
     "RunState",
     "PendingAction",
+    "RequiredInteraction",
+    "RequiredInteractionKind",
     "Session",
     "TerminationReason",
     "WaitReason",

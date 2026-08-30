@@ -132,6 +132,13 @@ class UserMessage:
 
 
 @dataclass(frozen=True, slots=True)
+class ProjectInstructionMessage:
+    """Request-local untrusted project guidance, never trusted user input."""
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeInstructionMessage:
     """Request-local Runtime control instruction, never user-authored history."""
 
@@ -172,6 +179,7 @@ class ToolResultMessage:
 InternalMessage: TypeAlias = (
     SystemMessage
     | UserMessage
+    | ProjectInstructionMessage
     | RuntimeInstructionMessage
     | AssistantMessage
     | ToolResultMessage
@@ -233,6 +241,7 @@ __all__ = [
     "ModelRequest",
     "ModelResponse",
     "ModelUsage",
+    "ProjectInstructionMessage",
     "RuntimeInstructionMessage",
     "SystemMessage",
     "ToolCall",

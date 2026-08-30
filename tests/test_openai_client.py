@@ -24,6 +24,7 @@ from coding_agent.protocol import (
     AssistantMessage,
     ModelRequest,
     ModelResponse,
+    ProjectInstructionMessage,
     RuntimeInstructionMessage,
     SystemMessage,
     ToolCall,
@@ -190,6 +191,29 @@ def test_runtime_instruction_has_distinct_internal_type_and_user_wire_role() -> 
         "role": "user",
         "content": "[Runtime instruction] Audit now",
     }
+
+
+def test_project_instruction_has_distinct_internal_type_and_user_wire_role() -> None:
+    client, sdk = _client(_response(text="done"))
+
+    client.complete(
+        ModelRequest(
+            messages=(
+                ProjectInstructionMessage(
+                    "[Untrusted project instructions] Run pytest."
+                ),
+                UserMessage("Fix it"),
+            )
+        )
+    )
+
+    assert sdk.completions.calls[0]["messages"][:2] == [
+        {
+            "role": "user",
+            "content": "[Untrusted project instructions] Run pytest.",
+        },
+        {"role": "user", "content": "Fix it"},
+    ]
 
 
 def test_reasoning_continuation_is_hidden_from_value_object_repr() -> None:

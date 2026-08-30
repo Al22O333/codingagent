@@ -164,10 +164,12 @@ v1 需要保护的主要资产包括：
 | 读取 Sensitive Path | `CONFIRM` | Agent 应仅在合理判断任务需要时提出；必须提示内容可能发送给模型 |
 | 创建普通文件或目录 | `ALLOW` | 仅限 workspace 内且符合当前任务 |
 | 修改 workspace 内普通文件 | `ALLOW` | 仅限 workspace 内且符合当前任务 |
+| 移动或重命名普通 workspace path | `ALLOW` | source 与 destination 都通过 canonical boundary、Protected / Sensitive 和 WRITE_SCOPE 检查；destination 不得存在 |
 | 创建或修改 Sensitive Path | `CONFIRM` | Agent 应仅在合理判断任务需要时提出；必须提示敏感内容及覆盖风险 |
 | File Tool 读取 `.git` 内部文件 | `CONFIRM` | Agent 应仅在合理判断任务需要时提出；仍受 Sensitive Path 规则约束 |
 | File Tool 修改 `.git` 内部文件 | `DENY` | Git 状态修改通过受控 Git 操作完成 |
-| 删除文件或目录 | `CONFIRM` | 展示精确目标；批量目标需整体确认 |
+| 删除普通文件或空目录 | `CONFIRM` | `delete_path` 展示一个精确目标并只授权一次 execution attempt；不提供批量或 recursive 参数 |
+| 删除 workspace root 或 non-empty directory | `DENY` | 不形成 recursive delete / `rm -rf` 等价能力 |
 | 普通测试命令 | `ALLOW` | 仍受 Shell Accepted Risks 约束 |
 | 普通编译 / 构建命令 | `ALLOW` | 仍受 Shell Accepted Risks 约束 |
 | 普通程序执行 | `ALLOW` | 仍受 Shell Accepted Risks 约束 |

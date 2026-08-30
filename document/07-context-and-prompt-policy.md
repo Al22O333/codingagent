@@ -248,6 +248,58 @@ an action or successful verification that was not actually observed.
 
 ---
 
+### 4.4 Root `AGENTS.md` Project Instructions
+
+v1 支持一个正式、单一的 project instruction source：
+
+```text
+<workspace-root>/AGENTS.md
+```
+
+首版只支持 root file，不递归扫描、不解析 nested scope、不建立 glob / rule engine，也不兼容其他 instruction filename。它是 ordinary project guidance 的显式入口，可以说明 test command、coding convention、compatibility rule、generated-directory guidance、architecture note 与普通 project workflow；它不是 Runtime hard constraint、System safety override、permission override、persistent memory 或通用 InstructionManager。
+
+每个 Agent Run 开始时，Runtime composition 所绑定的 root instruction source 必须根据当前 workspace truth 重新读取一次。该 snapshot 只对当前 Run 有效：不进入 completed-run continuity，不跨进程持久化，Run 结束即丢弃。文件不存在、不是 regular text file、不是有效 UTF-8、解析失败或安全验证失败时，不产生 project-instruction message，行为完全退化为没有该能力时的旧行为。
+
+读取必须复用 06 owning 的 canonical workspace path resolver，并满足：
+
+* 只尝试精确 root `AGENTS.md`，不因内容引用而自动读取其他文件；
+* resolved target 必须仍在 workspace 内；
+* resolved target 不得是 Sensitive Path 或 Protected Path；
+* symlink / junction 不能绕过 containment 或 Sensitive / Protected classification；
+* 内容使用固定 byte bound；超限只保留 UTF-8-safe prefix并显式标记 truncation；
+* NUL / invalid UTF-8 不作为 instructions 进入模型；
+* 与已知 Runtime Secret 完全相同的值在进入 Context 前 deterministic redaction。
+
+Project instructions 使用 provider-neutral `ProjectInstructionMessage` 表示。它在 provider wire 上使用 ordinary `user` role，但拥有独立 internal type，以免被误认为用户当前输入、Runtime control instruction 或 completed-run continuity。每次 request 的顺序为：
+
+```text
+Base System Prompt
+→ current-Run ProjectInstructionMessage（如果存在）
+→ retained completed-run continuity
+→ current User Task and Run history
+→ required tail Runtime instructions
+```
+
+message wrapper 必须明确其来源与下列优先级：
+
+```text
+Runtime fixed safety / permission policy
+>
+current normalized explicit hard constraints
+>
+current user task, trusted clarifications and semantic scope
+>
+applicable project instructions
+>
+ordinary workspace content
+>
+historical continuity
+```
+
+因此 project instructions 不能授权 workspace escape、Sensitive / Protected Path bypass、Secret access、permission bypass、Git remote mutation、system / privilege action，也不能解除、扩大或绕过当前 Runtime constraint state。只有 trusted user input 可以更新 explicit constraints。该优先级由 Runtime enforcement 与明确 message provenance 共同表达；不能仅依赖项目文本自称拥有更高 authority。
+
+---
+
 ## 5. What the Base Prompt Does Not Own
 
 Base Prompt 不复制以下 Runtime contract：
@@ -887,6 +939,20 @@ Run 建立自动 cross-run continuity record。
 * v1 不建立 failed-run summary system。
 
 后续如果用户希望继续，应以新的 User Task 和当前 Workspace State 为基础。
+
+### 18.1 Persistent Completed-Run Continuity
+
+当用户通过 09 的显式 persistence CLI 请求保存 Session 时，ContextManager 当前保留的 bounded `COMPLETED` Run continuity pairs 可以跨进程序列化。持久化表示仍然只包含：
+
+```text
+Initial User Task
++
+Final Assistant Response
+```
+
+每个字段和整个 document 均有 deterministic size bound；已知 Runtime Secret 在写入前替换为 redaction marker。Tool units、provider reasoning、project instructions、current-run messages、constraint state、pending correspondence 和 `history_incomplete` 均不在 export contract 中。
+
+Restore 只把验证通过的 task/final pairs 放回 retained historical continuity。它不得调用 trusted constraint normalizer，不得把 persisted text 变成 current user input，也不得恢复旧 root/scoped project instructions。下一 Run 的 project instructions 必须重新从当前 Workspace State 加载。
 
 ---
 
@@ -1934,28 +2000,29 @@ search_text
 
 ---
 
-## 52. v1 Memory Boundary
+## 52. Memory and Persistence Boundary
 
-v1 Memory只存在于：
+Memory只存在于：
 
 ```text
 active process
 current Session
 current / retained Runs
+explicit terminal-safe completed-run checkpoint
 ```
 
 不提供：
 
 ```text
-cross-process resume
-persistent conversation memory
+unfinished Run resume
+arbitrary persistent conversation memory
 vector database
 embedding retrieval
 long-term user memory
 semantic workspace index
 ```
 
-程序结束后，不承诺恢复 Context。
+程序结束后，只有用户显式保存且通过 schema/workspace validation 的 bounded completed-run task/final continuity 可以恢复；其他 Context 与 Runtime state 一律不恢复。
 
 ---
 
@@ -2086,7 +2153,7 @@ Context-ranking model
 Tokenizer abstraction hierarchy
 VectorStore
 Embedding service
-Persistent Session store
+general persistent memory framework
 ```
 
 如果一个小型：
