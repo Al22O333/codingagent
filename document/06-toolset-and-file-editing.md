@@ -1522,7 +1522,7 @@ PARENT_DIRECTORY_NOT_FOUND
 * 自动创建多层目录；
 * 猜测用户希望的新项目结构。
 
-若模型确实需要创建目录，可以在后续真实需求出现时决定是否增加 dedicated Tool；当前 v1 不提前实现。
+目录创建由 §14A.1 的 dedicated `create_directory` Tool负责；`create_file` 本身仍不隐式创建任意 parent tree。
 
 ---
 
@@ -1592,7 +1592,7 @@ move_path(source: str, destination: str)
 
 统一表达 rename 与 move，并支持普通 regular file 与 directory。source 使用 Existing Path resolution，destination 使用 New Path resolution；两者都进入同一个 `FileOperationFacts.affected_paths`，因此 workspace containment、Sensitive / Protected Path 与 `WRITE_SCOPE` 同时覆盖 source 和 destination。destination direct parent 必须存在；destination 已存在时固定失败，不提供 overwrite 参数，不自动解释 Git/VCS 语义。
 
-source 为 workspace root、final symlink / junction / reparse entry、unsupported special file，或 directory destination 位于 source 自身内部时固定失败。Windows execution 使用 `os.rename`，其 existing-destination 失败语义与 execution-time destination recheck共同保证不静默 overwrite。其他平台若 local rename primitive 不能维持同一 contract，应返回 operation failure 而不是降级为 overwrite。
+source 为 workspace root、final symlink / junction / reparse entry、unsupported special file，或 directory destination 位于 source 自身内部时固定失败。Windows execution 使用 destination-exists时失败的原生`os.rename`语义；Linux使用`renameat2(RENAME_NOREPLACE)`关闭最终native-operation竞态窗口。Linux primitive不可用或其他平台没有已支持的atomic no-replace primitive时返回`MOVE_NO_REPLACE_UNAVAILABLE`，不得降级为overwrite、copy/delete或Shell move。
 
 execution 重新解析 source / destination、核对 prepared source identity并检查 destination 仍 absent。source 消失、identity 改变、destination 出现或 parent 改变都产生 structured conflict / race failure，不执行替代复制、递归删除或 partial fallback。
 
@@ -1621,6 +1621,7 @@ UNSUPPORTED_FILE_TYPE
 MOVE_DESTINATION_INSIDE_SOURCE
 MOVE_WORKSPACE_ROOT_DENIED
 MOVE_CONFLICT
+MOVE_NO_REPLACE_UNAVAILABLE
 MOVE_FAILED
 DELETE_TARGET_CHANGED
 DIRECTORY_NOT_EMPTY

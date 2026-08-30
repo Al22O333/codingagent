@@ -769,6 +769,8 @@ Normal / Debug CLI renderer
 
 该 callback 只接收 bounded observability facts。它是 synchronous、optional、read-only；其 return value 不参与 Agent control flow。它不得决定下一步 action、修改 `ToolResult` 或 `PolicyDecision`、改变 Run lifecycle、触发 Tool、改变 permission、扩大 privilege，或承担 persistent state ownership。Callback failure 必须被隔离，不得成为 Agent control-flow failure。
 
+Synchronous callback latency与stdout consumer backpressure计入Run wall-clock；极慢或阻塞的consumer可能消耗active-duration budget。v1隔离callback exception与control authority，但不承诺observer operational-latency isolation。
+
 “Optional”表示 Runtime 在 deterministic tests 或其他无 renderer 的 composition 中可以没有 observer；v1 CLI 为实现本文 Normal / Debug contract 时应提供该 callback。
 
 该 seam 至少应能向 CLI 提供：
@@ -1447,6 +1449,8 @@ coding-agent --workspace <PATH> --json <one-shot task...>
 
 在该模式中，stdout 必须恰好包含一个 newline-terminated valid JSON document。startup banner、progress、permission UI、Debug diagnostics 和其他 human presentation 不得混入 stdout；必要的 interactive prompt 或 diagnostic 可以使用 stderr。JSON 不含 Markdown、raw provider response、完整 Tool history、content-bearing Tool arguments 或 Runtime Secret。
 
+该machine contract也覆盖argparse阶段的missing required option、invalid value、unknown option与mutual-exclusion failure。CLI只pre-scan第一个显式`--json`/`--jsonl`以选择错误envelope，完整argv仍由同一个ArgumentParser解析；human mode继续使用标准argparse stderr/exit 2，`--help`保持标准行为。
+
 schema version 1 固定包含：
 
 ```text
@@ -1518,9 +1522,11 @@ Session documents 存在用户级 session directory；测试或受控 automation
 
 Human mode 显示 bounded session ID。`--json` 与 persistence/resume组合时保留现有 schema version和字段，并额外包含 `session_id`、`session_checkpoint_updated` 与 nullable bounded `session_error`；未请求 persistence 时现有 JSON document shape不变。
 
-`--list-sessions` 与 `--delete-session` 是 model-free management operations：不接受 positional task或 `--non-interactive`，不进入 interactive loop，不需要 provider credentials，也不构造 ModelClient。List 只显示绑定当前 canonical workspace 的 session ID、validated UTC update time与 completed-run count；不显示 task/final continuity或其他 workspace sessions。损坏、不可读或 symbolic-link documents 只贡献 anonymous `skipped_invalid_entries` count。Delete 要求 exact canonical UUID，验证 document、regular file与 workspace binding后只 unlink该 checkpoint；missing与 wrong-workspace均 deterministic failure。
+`--list-sessions` 与 `--delete-session` 是 model-free management operations：不接受 positional task或 `--non-interactive`，不进入 interactive loop，不需要 provider credentials，也不构造 ModelClient。List 只显示绑定当前 canonical workspace 的 session ID、validated UTC update time与 completed-run count；不显示 task/final continuity或其他 workspace sessions。Directory metadata可以为确定性选择而enumerate，但最多解析按canonical filename排序后的256个UUID checkpoint，并最多返回100个summary；超过scan/result bound时设置`truncated=true`。损坏、不可读或 symbolic-link documents 只在已扫描集合内贡献 anonymous `skipped_invalid_entries` count。Delete 要求 exact canonical UUID，验证 document、regular file与 workspace binding后只 unlink该 checkpoint；missing与 wrong-workspace均 deterministic failure。
 
-Management JSON 是独立 schema-versioned document。List 返回 `operation=list_sessions`、`workspace_identity`、metadata-only `sessions` array与 `skipped_invalid_entries`；delete返回 `operation=delete_session`、exact `session_id`与 `deleted=true`。管理失败沿用 no-Run startup failure document且 process exit code为 `2`。
+Management JSON 是独立 schema-versioned document。List 返回 `operation=list_sessions`、`workspace_identity`、metadata-only `sessions` array、`skipped_invalid_entries`与stable boolean `truncated`；delete返回 `operation=delete_session`、exact `session_id`与 `deleted=true`。管理失败沿用 no-Run startup failure document且 process exit code为 `2`。
+
+同一Session UUID的concurrent multi-process mutation不受支持，调用方应维持single writer。Atomic checkpoint只保证document不半写，不保证writer serialization；并发writer可能last-writer-wins。Delete只保证命令执行时checkpoint被移除，不kill/revoke active process；已active的resumed process完成后可能重新创建该UUID。
 
 ### 42.4 Opt-In Change and Command Review
 
@@ -1574,9 +1580,13 @@ stdout只包含newline-delimited schema version 1 JSON documents。每行拥有�
 
 最后恰有一个`type=result` line，其`result`复用§42.1 terminal JSON document（包括显式请求的review/session optional fields）。Startup/usage failure没有event line，只返回sequence 1的terminal result。Process exit code继续使用现有lifecycle语义。
 
+§42.1的machine-aware argparse规则同样适用于JSONL；即使完整parse失败，只要第一个显式machine intent为`--jsonl`，stdout仍只有sequence 1 terminal result且不产生`run_started`。
+
 Event只投影Runtime已经bounded、Secret-redacted的normalized scalar facts，并在CLI再次redact。JSONL明确剔除`action`、`diagnostic`、`pre_existing_paths`、`known_touched_paths`与`new_or_other_paths`；因此不包含Shell stdout/stderr、content-bearing Tool arguments、exact path lists、provider payload或reasoning continuation。需要exact terminal path/command facts时由用户显式组合`--review`，只在result中返回。
 
 JSONL是Runtime event stream，不是provider token streaming、partial Assistant/ToolCall protocol、Tool output streaming、persistent log或control channel。Event consumer不能approve permission、回答clarification或改变Runtime；required interaction仍只在terminal result中以exit 3表示。
+
+JSONL继承同步observer的backpressure contract：callback return与exception不改变Agent决策，但阻塞stdout consumer的等待时间属于Run wall-clock并可能消耗duration budget。
 
 ---
 

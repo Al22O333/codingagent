@@ -306,6 +306,8 @@ Runtime 可以在 mutable `AgentRun` 上组装04定义的 bounded command-execut
 
 Composition root可以向Runtime注入一个 synchronous read-only event observer用于human renderer或machine JSONL projection；同一Runtime只绑定一个observer。Observer仍没有control authority，其失败按既有隔离语义处理。JSONL属于CLI对完整 normalized RuntimeEvent的逐事件投影，不改变ModelClient的non-streaming complete-response contract。
 
+Synchronous observer 的 return value 不参与 Agent control flow，callback exception 必须被隔离；但 callback latency与stdout backpressure仍属于当前 Run 的 wall-clock。极慢或阻塞的consumer可能消耗 active-duration budget，v1不提供observer operational-latency isolation。
+
 ---
 
 ### 4.2 ContextManager
@@ -335,6 +337,8 @@ Composition root可以向Runtime注入一个 synchronous read-only event observe
 `SessionStore` 是 composition-root 使用的 Lean terminal-safe persistence boundary。它只序列化 07 定义的 immutable completed-run continuity records 与最小 session metadata；它不参与 Agent loop、Run lifecycle、Context eviction、Policy 或 Tool dispatch。
 
 它必须提供 deterministic load/save/list/delete failure codes，验证 canonical session ID、schema version 和 workspace identity，并以 sibling temporary file + atomic replace 更新单个 session document。List 只返回 current-workspace metadata summaries，不返回 continuity；其他 workspace 的合法 documents 不可见，损坏或 symbolic-link entries 只形成 anonymous skipped count。Delete 必须在 unlink 前完成 exact ID、regular-file 与 workspace 验证，且只删除单个 checkpoint。
+
+同一 Session UUID采用single-writer expectation，不支持concurrent multi-process mutation。Atomic replace防止单次checkpoint半写，但不提供writer serialization；并发save可能last-writer-wins。Delete不是active-process revocation，只保证调用成功时exact document已被移除。
 
 List/delete 是 model-free composition-root operations，不要求 provider model、base URL 或 API key，也不得构造 `ModelClient`。它们不得解释对话语义、扫描 Workspace、序列化 ContextManager 内部状态，或持有 mutable `AgentRun`。
 

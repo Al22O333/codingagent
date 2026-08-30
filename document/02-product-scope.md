@@ -21,12 +21,13 @@
 
 ## 2. Product Form
 
-v1 是一个 **Local Interactive CLI**：
+v1 是一个 **Local CLI**：
 
 - 在用户本机运行。
 - 面向用户明确指定的本地 workspace。
-- 通过命令行与用户交互。
-- 支持在同一次程序运行期间连续提出和完成多个相关任务。
+- 支持 interactive Session，也支持 one-shot task invocation。
+- 为 automation 提供显式 machine-readable 与 non-interactive surface。
+- interactive mode 支持在同一次程序运行期间连续提出和完成多个相关任务。
 
 CLI 的具体命令、参数、输出布局和交互细节不在本文定义。
 

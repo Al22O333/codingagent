@@ -201,6 +201,8 @@ Runtime 只规定：
 
 Persistent Session resume 只恢复 conversational continuity，不恢复 execution state。一个可恢复 checkpoint 只由最近 bounded 数量的 `COMPLETED` Run 的 initial task 与真实 Final 组成，并绑定 stable session ID、schema version 与 canonical workspace identity。
 
+同一个 Persistent Session UUID 的 concurrent multi-process mutation 不属于 v1 支持合同；一个 UUID 预期只有一个 active writer。Atomic checkpoint replacement 只保证单份 document 不半写，不提供跨进程序列化：并发 writer 可能 last-writer-wins。Management delete 只保证命令执行时删除 exact checkpoint，不终止或 revoke 已经 active 的 resumed process；该 process 后续完成时可能重新创建同一 UUID。
+
 新进程 resume 时必须：
 
 ```text
