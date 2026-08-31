@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields, is_dataclass
@@ -13,8 +14,8 @@ from openai import (
     APIConnectionError,
     APIStatusError,
     APITimeoutError,
+    AsyncOpenAI,
     InternalServerError,
-    OpenAI,
     OpenAIError,
     RateLimitError,
 )
@@ -40,6 +41,9 @@ from .protocol import (
 )
 
 
+_INTERRUPT_POLL_SECONDS = 0.1
+
+
 @dataclass(frozen=True, slots=True)
 class OpenAICompatibleConfig:
     model: str
@@ -59,7 +63,7 @@ class OpenAICompatibleConfig:
 
 
 class OpenAICompatibleModelClient:
-    """Translate provider-neutral contracts to one non-streaming SDK request."""
+    """Synchronous, non-streaming contract with cancellable internal HTTP I/O."""
 
     def __init__(
         self,
@@ -68,12 +72,8 @@ class OpenAICompatibleModelClient:
         sdk_client: Any | None = None,
     ) -> None:
         self._config = config
-        self._client = sdk_client or OpenAI(
-            api_key=config.api_key,
-            base_url=config.base_url,
-            timeout=config.timeout_seconds,
-            max_retries=0,
-        )
+        # An injected async SDK is caller-owned (primarily a test seam).
+        self._client = sdk_client
 
     def complete(self, request: ModelRequest) -> ModelResponse:
         payload: dict[str, object] = {
@@ -86,7 +86,7 @@ class OpenAICompatibleModelClient:
             payload["tool_choice"] = "auto"
 
         try:
-            response = self._client.chat.completions.create(**payload)
+            response = asyncio.run(self._request(payload))
         except (APITimeoutError, APIConnectionError, RateLimitError, InternalServerError) as error:
             raise TransientProviderError(str(error)) from error
         except APIStatusError as error:
@@ -97,6 +97,34 @@ class OpenAICompatibleModelClient:
             raise FatalProviderError(str(error)) from error
 
         return self._normalize_response(response)
+
+    async def _request(self, payload: dict[str, object]) -> object:
+        if self._client is not None:
+            return await self._wait_for_response(self._client, payload)
+        # Each complete() owns its event loop and HTTP client. Close connections
+        # before returning, including on cancellation; never reuse a closed loop.
+        async with AsyncOpenAI(
+            api_key=self._config.api_key,
+            base_url=self._config.base_url,
+            timeout=self._config.timeout_seconds,
+            max_retries=0,
+        ) as client:
+            return await self._wait_for_response(client, payload)
+
+    @staticmethod
+    async def _wait_for_response(client: Any, payload: dict[str, object]) -> object:
+        response_task = asyncio.create_task(client.chat.completions.create(**payload))
+        try:
+            # Windows socket waits can defer KeyboardInterrupt. Bounded event-loop
+            # wakeups let Python process Ctrl+C even when the server sends nothing.
+            while not response_task.done():
+                await asyncio.wait((response_task,), timeout=_INTERRUPT_POLL_SECONDS)
+            return response_task.result()
+        finally:
+            if not response_task.done():
+                response_task.cancel()
+            # Drain cancellation before closing the client or starting another Run.
+            await asyncio.gather(response_task, return_exceptions=True)
 
     @staticmethod
     def _serialize_messages(

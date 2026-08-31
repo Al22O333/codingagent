@@ -1710,6 +1710,10 @@ Ctrl+D / stream EOF
 
 如果 local Tool execution正在进行，仍按06的 best-effort interruption / process cleanup能力处理。
 
+如果正在等待 OpenAI-compatible model response，concrete ModelClient 在内部使用可取消的 async HTTP I/O，最长每 100 ms 唤醒等待循环以处理 Windows Ctrl+C。对 Runtime 的 `complete()` 接口仍然是同步、非流式的完整响应接口；取消时先 cancel / drain 本次请求并关闭该请求拥有的 HTTP client，再由 Runtime 按原有路径结束 Run。不得后台保留请求并在后续 Run 中消费迟到的 response / ToolCall；SDK retry 仍关闭，retry policy 仍归 Runtime。
+
+100 ms 是网络等待循环的唤醒间隔，不是端到端取消时延的硬保证；OS 调度、连接初始化和 Run 收尾仍可能增加耗时。受控回归分别覆盖等待响应头、等待未完成正文、连接关闭及同 Session 续用。
+
 不得因为一个 cancelled Run留下 protocol/context pending state而永久毒化 Session。
 
 ---

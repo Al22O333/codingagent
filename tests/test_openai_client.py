@@ -46,7 +46,7 @@ class FakeCompletions:
         self.events = list(events)
         self.calls: list[dict[str, object]] = []
 
-    def create(self, **payload: object) -> object:
+    async def create(self, **payload: object) -> object:
         self.calls.append(payload)
         event = self.events.pop(0)
         if isinstance(event, Exception):
@@ -58,6 +58,13 @@ class FakeSDK:
     def __init__(self, events: list[object]) -> None:
         self.completions = FakeCompletions(events)
         self.chat = SimpleNamespace(completions=self.completions)
+        self.closed = False
+
+    async def __aenter__(self) -> FakeSDK:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        self.closed = True
 
 
 def _response(
@@ -479,14 +486,39 @@ def test_default_sdk_client_uses_bounded_timeout_and_disables_sdk_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
+    clients: list[FakeSDK] = []
 
     def fake_openai(**kwargs: object) -> object:
         captured.update(kwargs)
-        return object()
+        sdk = FakeSDK([_response(text="ready")])
+        clients.append(sdk)
+        return sdk
 
-    monkeypatch.setattr("coding_agent.openai_client.OpenAI", fake_openai)
+    monkeypatch.setattr("coding_agent.openai_client.AsyncOpenAI", fake_openai)
 
-    OpenAICompatibleModelClient(
+    client = OpenAICompatibleModelClient(
+        OpenAICompatibleConfig(
+            model="test-model",
+            base_url="https://provider.invalid/v1",
+            api_key="test-key",
+        )
+    )
+    request = ModelRequest(messages=(UserMessage("Hi"),))
+    assert client.complete(request).text == "ready"
+    assert client.complete(request).text == "ready"
+
+    assert captured["base_url"] == "https://provider.invalid/v1"
+    assert captured["timeout"] == 60.0
+    assert captured["max_retries"] == 0
+    assert len(clients) == 2
+    assert all(sdk.closed for sdk in clients)
+
+
+def test_owned_sdk_closes_on_provider_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    request = httpx.Request("POST", "https://provider.invalid/v1/chat/completions")
+    sdk = FakeSDK([APITimeoutError(request=request)])
+    monkeypatch.setattr("coding_agent.openai_client.AsyncOpenAI", lambda **kwargs: sdk)
+    client = OpenAICompatibleModelClient(
         OpenAICompatibleConfig(
             model="test-model",
             base_url="https://provider.invalid/v1",
@@ -494,6 +526,7 @@ def test_default_sdk_client_uses_bounded_timeout_and_disables_sdk_retry(
         )
     )
 
-    assert captured["base_url"] == "https://provider.invalid/v1"
-    assert captured["timeout"] == 60.0
-    assert captured["max_retries"] == 0
+    with pytest.raises(TransientProviderError):
+        client.complete(ModelRequest(messages=(UserMessage("Hi"),)))
+
+    assert sdk.closed
