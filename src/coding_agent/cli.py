@@ -1119,6 +1119,27 @@ def _run_task(
         return 130
     stdout.write(f"\n{_DIVIDER}\n✗ 本次运行失败\n{_DIVIDER}\n\n")
     stdout.write("原因：" + _failure_message(run.termination_reason, run.limit_reached) + "\n")
+    if run.failure_diagnostic is not None:
+        diagnostic = run.failure_diagnostic
+        stdout.write(
+            "诊断："
+            + _redact_values(
+                f"{diagnostic.code} ({diagnostic.error_type})；阶段：{diagnostic.phase}",
+                secret_values,
+            )
+            + "\n"
+        )
+        if diagnostic.context_chars is not None:
+            stdout.write(
+                f"上下文：{diagnostic.context_chars}/{diagnostic.context_limit} 字符"
+                f"（含 provider reasoning {diagnostic.reasoning_chars} 字符）\n"
+            )
+        explanations = {
+            "CONTEXT_LIMIT_EXCEEDED": "必须保留的模型上下文超过上限；不是任务时长或工具次数限制。",
+            "MODEL_RESPONSE_JSON_INVALID": "模型请求阶段发生 JSON 解析错误；原始响应内容未输出。",
+            "UNEXPECTED_RUNTIME_ERROR": "发生未分类的运行时异常；可用 --debug 查看脱敏代码位置。",
+        }
+        stdout.write(explanations[diagnostic.code] + "\n")
     if run.required_interaction is not None:
         stdout.write(_render_required_interaction(run) + "\n")
     if include_review:
@@ -1142,7 +1163,7 @@ def _run_json_document(
         if run.final_response is not None
         else None
     )
-    normalized_error: dict[str, str] | None = None
+    normalized_error: dict[str, object] | None = None
     if run.state is RunState.FAILED:
         code = (
             run.termination_reason.value
@@ -1156,6 +1177,11 @@ def _run_json_document(
                 1_000,
             ),
         }
+        if run.failure_diagnostic is not None:
+            normalized_error["diagnostic"] = {
+                key: _redact_values(value, secret_values) if isinstance(value, str) else value
+                for key, value in run.failure_diagnostic.facts().items()
+            }
     document: dict[str, object] = {
         "schema_version": 1,
         "lifecycle_state": run.state.value,

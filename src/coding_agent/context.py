@@ -27,6 +27,15 @@ class ContextLimitError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class ModelContextSize:
+    """Content-free size of the latest attempted model-visible snapshot."""
+
+    chars: int
+    limit: int
+    reasoning_chars: int
+
+
+@dataclass(frozen=True, slots=True)
 class CompletedRunContinuity:
     """Terminal-safe conversational continuity for one completed Run."""
 
@@ -58,6 +67,11 @@ class ContextManager:
         self._run_active = False
         self._history_incomplete = False
         self._project_instruction: ProjectInstructionMessage | None = None
+        self._last_model_context_size: ModelContextSize | None = None
+
+    @property
+    def last_model_context_size(self) -> ModelContextSize | None:
+        return self._last_model_context_size
 
     @property
     def history_incomplete(self) -> bool:
@@ -107,6 +121,7 @@ class ContextManager:
         """Start one Run with fresh transient history."""
         if self._run_active:
             raise ContextOrderError("cannot start a run while another run is active")
+        self._last_model_context_size = None
         self._pending_tool_calls.clear()
         self._pending_candidate = None
         self._messages = [message]
@@ -120,6 +135,7 @@ class ContextManager:
 
     def end_run(self, *, completed: bool) -> None:
         """Finalize continuity and clear all current-Run transient state."""
+        self._last_model_context_size = None
         if self._run_active and completed:
             continuity = self._completed_run_summary()
             if continuity is not None and self._max_retained_completed_runs:
@@ -227,6 +243,8 @@ class ContextManager:
             while index < len(current_units) and index in protected:
                 index += 1
             if index >= len(current_units):
+                if project_tool_results:
+                    self._record_model_context_size(visible_units())
                 raise ContextLimitError(
                     "mandatory model-visible context exceeds max_context_chars"
                 )
@@ -243,10 +261,25 @@ class ContextManager:
         self._completed_run_continuity = continuity
         self._messages = [message for unit in current_units for message in unit]
         result_units = visible_units()
+        if project_tool_results:
+            self._record_model_context_size(result_units)
         return tuple(
             message
             for unit in result_units
             for message in unit
+        )
+
+    def _record_model_context_size(
+        self, units: list[tuple[InternalMessage, ...]],
+    ) -> None:
+        self._last_model_context_size = ModelContextSize(
+            chars=self._units_size(units),
+            limit=self._max_context_chars,
+            reasoning_chars=sum(
+                len(message.provider_reasoning_content or "")
+                for unit in units for message in unit
+                if isinstance(message, AssistantMessage)
+            ),
         )
 
     def build_model_messages(

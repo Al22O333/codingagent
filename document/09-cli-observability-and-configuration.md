@@ -1224,6 +1224,18 @@ FAILED
 
 而不给用户原因。
 
+`RUNTIME_FAILURE` 除原有终态说明外，Normal 还显示 content-free 诊断码、异常类型、失败阶段，以及可用的最近一次 model-visible Context 字符数 / 上限和其中的 provider reasoning 字符数：
+
+* `CONTEXT_LIMIT_EXCEEDED`：必须保留的模型上下文无法容纳；不是 Run duration 或 Tool count limit。
+* `MODEL_RESPONSE_JSON_INVALID`：model-request 阶段发生 JSON 解析错误；不表示已经确认服务故障原因。
+* `UNEXPECTED_RUNTIME_ERROR`：其他运行时异常，保留类型与阶段供定位。
+
+这些诊断码不改变 `termination_reason`、retry policy、权限或清理语义。Context 计数采用已有字符估算，包含隐藏的 provider reasoning；超限时记录失败快照而不是上一轮成功快照。Run 收尾清除 Context 内计数，已失败 Run 仅保留标量诊断，不把它注入后续模型对话。
+
+Debug 的 `runtime_failure` event 以及 JSON / JSONL failure result 中可选的 `normalized_error.diagnostic` 提供 `code`、`error_type`、`phase`、`context_chars`、`context_limit`、`reasoning_chars`、`trace`。`trace` 只含白名单模块的函数名和行号，最多保留八个位置、总计 1,000 字符；不含完整文件路径、源码行或 locals。不得输出 `str(exception)`、原始 HTTP body / headers、模型正文或 reasoning 文本。诊断采集自身失败时使用最小安全 fallback，不得遮蔽原异常或跳过 Run cleanup。
+
+诊断仍只写到当前 terminal / 显式选择的 machine output，不自动创建日志文件或上传 telemetry。后续复现可追加 `--debug` 并保存显示的脱敏诊断；没有本次异常记录时，不得仅凭通用文案断言具体根因。
+
 ---
 
 ### 36. COMPLETED Must Not Mean “Task Succeeded”

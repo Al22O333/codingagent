@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import StrEnum
+from json import JSONDecodeError
 from math import isfinite
 from time import monotonic, sleep
 from types import MappingProxyType
@@ -27,7 +29,7 @@ from .constraints import (
     apply_constraint_update,
     normalize_explicit_constraint_update,
 )
-from .context import CompletedRunContinuity, ContextManager
+from .context import CompletedRunContinuity, ContextLimitError, ContextManager
 from .interaction import (
     ConfirmationDecision,
     ConfirmationRequest,
@@ -198,6 +200,22 @@ class _ToolDispatchResult:
 
 
 @dataclass(frozen=True, slots=True)
+class FailureDiagnostic:
+    """Bounded metadata only: never exception text, provider payloads or locals."""
+
+    code: str
+    error_type: str
+    phase: str
+    context_chars: int | None
+    context_limit: int | None
+    reasoning_chars: int | None
+    trace: str
+
+    def facts(self) -> dict[str, str | int | None]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeLimits:
     """Explicit hard limits supplied by configuration."""
 
@@ -235,6 +253,7 @@ class AgentRun:
     termination_reason: TerminationReason | None = None
     limit_reached: str | None = None
     last_error: Exception | None = None
+    failure_diagnostic: FailureDiagnostic | None = None
     explicit_user_clarifications: list[str] = field(default_factory=list)
     explicit_scope_updates: list[str] = field(default_factory=list)
     explicit_task_constraints: ExplicitConstraintSnapshot = field(
@@ -259,6 +278,7 @@ class AgentRun:
     )
     _known_agent_touched_paths: set[str] = field(default_factory=set, repr=False)
     _workspace_execution_uncertain: bool = field(default=False, repr=False)
+    _diagnostic_phase: str = field(default="run_setup", repr=False)
 
 
 @dataclass(slots=True)
@@ -385,6 +405,18 @@ class AgentRuntime:
                 run_started_at,
                 error,
             )
+            try:
+                agent_run.failure_diagnostic = self._build_failure_diagnostic(
+                    agent_run, error,
+                )
+            except Exception:
+                # Diagnostics must never mask the original failure or skip cleanup.
+                agent_run.failure_diagnostic = FailureDiagnostic(
+                    code="UNEXPECTED_RUNTIME_ERROR", error_type="Exception",
+                    phase=agent_run._diagnostic_phase, context_chars=None,
+                    context_limit=None, reasoning_chars=None, trace="",
+                )
+            self._emit("runtime_failure", **agent_run.failure_diagnostic.facts())
         finally:
             if agent_run.state in {
                 RunState.COMPLETED,
@@ -443,7 +475,9 @@ class AgentRuntime:
         run_started_at: float,
     ) -> AgentRun:
         """Execute the normal lifecycle beneath the public terminal boundary."""
+        agent_run._diagnostic_phase = "context_start"
         self._context_manager.start_run(UserMessage(text=task))
+        agent_run._diagnostic_phase = "task_constraints"
         self._apply_trusted_user_input(agent_run, task)
         corrective_feedback: SystemMessage | None = None
 
@@ -452,6 +486,7 @@ class AgentRuntime:
                 return agent_run
 
             was_incomplete = self._context_manager.history_incomplete
+            agent_run._diagnostic_phase = "context_build"
             messages = self._context_manager.build_model_messages(
                 completion_audit_active=agent_run.completion_audit_active,
                 corrective_instruction=(
@@ -468,6 +503,7 @@ class AgentRuntime:
             )
 
             try:
+                agent_run._diagnostic_phase = "model_request"
                 response = self._complete_model_request(
                     request,
                     agent_run,
@@ -490,6 +526,7 @@ class AgentRuntime:
             if response is None:
                 return agent_run
 
+            agent_run._diagnostic_phase = "response_validation"
             protocol_error = self._response_protocol_error(response)
             if protocol_error is not None:
                 if self._record_protocol_error(
@@ -521,12 +558,15 @@ class AgentRuntime:
                     tool_calls=response.tool_calls,
                     provider_reasoning_content=response.provider_reasoning_content,
                 )
+                agent_run._diagnostic_phase = "context_recording"
                 self._context_manager.record_assistant_message(assistant_message)
+                agent_run._diagnostic_phase = "tool_execution"
                 tool_results = self._execute_tool_batch(
                     response.tool_calls,
                     agent_run,
                     run_started_at,
                 )
+                agent_run._diagnostic_phase = "context_recording"
                 self._context_manager.record_tool_result_message(
                     ToolResultMessage(results=tool_results)
                 )
@@ -534,6 +574,7 @@ class AgentRuntime:
                     return agent_run
                 continue
 
+            agent_run._diagnostic_phase = "context_recording"
             assistant_message = AssistantMessage(
                 text=response.text,
                 provider_reasoning_content=response.provider_reasoning_content,
@@ -566,6 +607,57 @@ class AgentRuntime:
             return agent_run
 
         return agent_run
+
+    def _build_failure_diagnostic(
+        self, agent_run: AgentRun, error: Exception,
+    ) -> FailureDiagnostic:
+        code = "UNEXPECTED_RUNTIME_ERROR"
+        if isinstance(error, ContextLimitError):
+            code = "CONTEXT_LIMIT_EXCEEDED"
+        elif (
+            isinstance(error, JSONDecodeError)
+            and agent_run._diagnostic_phase == "model_request"
+        ):
+            code = "MODEL_RESPONSE_JSON_INVALID"
+
+        # Read code locations only, never format_exception(), str(error), source
+        # lines, locals, full filenames, or provider response / reasoning content.
+        locations: list[str] = []
+        trace = error.__traceback__
+        for _ in range(64):
+            if trace is None:
+                break
+            module = trace.tb_frame.f_globals.get("__name__", "")
+            function = trace.tb_frame.f_code.co_name
+            if (
+                isinstance(module, str)
+                and module.startswith(
+                    ("coding_agent.", "openai.", "httpx.", "httpcore.", "json.")
+                )
+                and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]{0,119}", module)
+                and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", function)
+            ):
+                locations.append(f"{module}.{function}:{trace.tb_lineno}")
+            trace = trace.tb_next
+        error_type = type(error).__name__
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", error_type):
+            error_type = "Exception"
+        if len(locations) > 8:
+            # Keep the Agent boundary as well as the exception's leaf frames.
+            agent_locations = [item for item in locations if item.startswith("coding_agent.")]
+            locations = list(dict.fromkeys([*agent_locations[-3:], *locations[-5:]]))
+        size = self._context_manager.last_model_context_size
+        return FailureDiagnostic(
+            code=code,
+            error_type=self._redact_runtime_secrets(error_type),
+            phase=agent_run._diagnostic_phase,
+            context_chars=size.chars if size is not None else None,
+            context_limit=size.limit if size is not None else None,
+            reasoning_chars=size.reasoning_chars if size is not None else None,
+            trace=_bounded_observation_text(
+                self._redact_runtime_secrets(" > ".join(locations)), 1_000,
+            ),
+        )
 
     def _terminate_run(
         self,
